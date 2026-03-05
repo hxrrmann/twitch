@@ -27,8 +27,9 @@
         <span id="status">Bereit.</span>
         <span id="pct" class="muted"></span>
       </div>
+      <!-- VOD-only: hide mode badge (kept in DOM to avoid any layout shift) -->
       <div class="mt-2 flex flex-wrap gap-2 justify-start lg:justify-end">
-        <span class="badge" id="modeBadge">—</span>
+        <span class="badge mode-badge-ghost" id="modeBadge">—</span>
       </div>
     </div>
   </header>
@@ -39,9 +40,10 @@
         <label class="label">Twitch URL</label>
         <input id="url" class="input" placeholder="https://www.twitch.tv/videos/... oder https://www.twitch.tv/amar" />
       </div>
-      <div class="lg:col-span-2">
+      <!-- VOD-only: remove mode selector from UI (ghost element preserves spacing) -->
+      <div class="lg:col-span-2 mode-ghost" aria-hidden="true">
         <label class="label">Modus</label>
-        <select id="mode" class="input"><option value="vod">VOD</option><option value="live">Live</option></select>
+        <select id="mode" class="input" disabled><option value="vod" selected>VOD</option></select>
       </div>
       <div class="lg:col-span-3 flex gap-2">
         <button id="start" class="btn btn-primary flex-1">Start</button>
@@ -53,14 +55,14 @@
           <input id="alertsInput" class="input flex-1" placeholder="More Nutrition, Bitpanda" />
           <button id="alertsBtn" class="btn btn-secondary">Setzen</button>
         </div>
-        <p class="hint">Words werden live geloggt und in den Sponsor Report übernommen.</p>
+        <p class="hint">Words werden automatisch geloggt und in den Sponsor Report übernommen.</p>
       </div>
     </div>
   </section>
 
   <div class="grid lg:grid-cols-12 gap-6 mt-8">
     <section class="card lg:col-span-6 p-5">
-      <div class="flex items-center justify-between mb-3"><h2 class="title">Live Transkript</h2><span class="hint">klickbare Timestamps bei VOD</span></div>
+      <div class="flex items-center justify-between mb-3"><h2 class="title">Transkript</h2><span class="hint">klickbare Timestamps bei VOD</span></div>
       <div id="transcript" class="panel h-96 overflow-auto pr-2"></div>
     </section>
 
