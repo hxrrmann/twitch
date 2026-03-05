@@ -1,1 +1,46 @@
-
+:root{--card:rgba(18,18,27,.66);--stroke:rgba(255,255,255,.08)}
+*{box-sizing:border-box}
+body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+.bg-grid{position:fixed;inset:0;background:
+radial-gradient(900px 450px at 20% 10%, rgba(139,92,246,.22), transparent 60%),
+radial-gradient(900px 450px at 80% 0%, rgba(34,197,94,.10), transparent 55%),
+radial-gradient(900px 450px at 70% 70%, rgba(56,189,248,.10), transparent 60%),
+linear-gradient(to bottom, rgba(255,255,255,.03) 1px, transparent 1px),
+linear-gradient(to right, rgba(255,255,255,.03) 1px, transparent 1px);
+background-size:auto,auto,auto,70px 70px,70px 70px;pointer-events:none}
+.card{background:var(--card);border:1px solid var(--stroke);border-radius:22px;box-shadow:0 0 0 1px rgba(255,255,255,.02) inset,0 20px 60px rgba(0,0,0,.45);backdrop-filter:blur(10px)}
+.label{display:block;font-size:12px;color:#b3b3c7;margin-bottom:6px}
+.hint{font-size:12px;color:#9ca3af}
+.title{font-size:16px;font-weight:650}
+.input{width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.10);background:rgba(0,0,0,.35);padding:12px 14px;outline:none}
+.input:focus{border-color:rgba(139,92,246,.60);box-shadow:0 0 0 6px rgba(139,92,246,.15)}
+.btn{border-radius:16px;padding:12px 14px;font-weight:750;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.06)}
+.btn:hover{background:rgba(255,255,255,.10)}
+.btn-primary{background:linear-gradient(135deg, rgba(139,92,246,.95), rgba(59,130,246,.75));border-color:rgba(139,92,246,.55);box-shadow:0 10px 30px rgba(139,92,246,.18)}
+.btn-secondary{background:linear-gradient(135deg, rgba(34,197,94,.30), rgba(139,92,246,.30));border-color:rgba(34,197,94,.35)}
+.btn-ghost{background:rgba(255,255,255,.04)}
+.panel{border:1px solid rgba(255,255,255,.08);border-radius:18px;background:rgba(0,0,0,.22);padding:10px}
+.row{border:1px solid rgba(255,255,255,.08);border-radius:18px;background:rgba(0,0,0,.28);padding:10px 12px}
+.row-top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.row-title{font-weight:750;color:#e5e7eb}
+.row-text{margin-top:8px;color:#d1d5db;font-size:13px;line-height:1.45}
+.row-meta{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px}
+.link{color:#a78bfa;font-weight:800}
+.link:hover{text-decoration:underline}
+.muted{color:#9ca3af;font-size:12px;font-weight:600}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.06);font-size:12px;color:#e5e7eb}
+.pill-warn{border-color:rgba(244,63,94,.35);background:rgba(244,63,94,.10)}
+.badge{font-size:12px;color:#e5e7eb;border:1px solid rgba(255,255,255,.10);padding:6px 10px;border-radius:999px;background:rgba(0,0,0,.25)}
+.chip{font-size:11px;letter-spacing:.12em;padding:6px 10px;border-radius:999px;border:1px solid rgba(139,92,246,.35);background:rgba(139,92,246,.12);color:#ddd6fe}
+.chip2{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:#dcfce7}
+.chip3{border-color:rgba(56,189,248,.35);background:rgba(56,189,248,.10);color:#cffafe}
+.dot{width:10px;height:10px;border-radius:999px;background:rgba(255,255,255,.18)}
+.dot-on{background:rgba(34,197,94,.9);box-shadow:0 0 0 6px rgba(34,197,94,.12),0 0 30px rgba(34,197,94,.35)}
+.heat{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:8px}
+.cell{border:1px solid rgba(255,255,255,.10);background:rgba(139,92,246,.25);border-radius:14px;padding:10px 0;font-weight:850;color:#e5e7eb}
+.cell:hover{filter:brightness(1.12)}
+.logo{width:54px;height:54px;border-radius:18px;background:linear-gradient(135deg, rgba(139,92,246,.70), rgba(34,197,94,.25));border:1px solid rgba(255,255,255,.10);box-shadow:0 15px 40px rgba(139,92,246,.18);padding:6px}
+.logo-inner{width:100%;height:100%;border-radius:14px;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;font-weight:950;font-size:20px;letter-spacing:.06em}
+::-webkit-scrollbar{width:10px}
+::-webkit-scrollbar-thumb{background:#27272a;border-radius:999px}
+::-webkit-scrollbar-track{background:transparent}
