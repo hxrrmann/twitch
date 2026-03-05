@@ -4,8 +4,10 @@ jinja2
 python-multipart
 
 yt-dlp
+
 faster-whisper
 ctranslate2
+
 webrtcvad
 
 reportlab
