@@ -26,7 +26,7 @@ DATA.mkdir(exist_ok=True)
 SEGMENT_SECONDS = 20
 WORKERS = 4
 
-app = FastAPI(title="Amar Stream AI Platform")
+app = FastAPI(title="Amar Stream AI")
 
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
@@ -37,7 +37,16 @@ model = WhisperModel("base", device="cpu", compute_type="int8")
 vad_model = load_silero_vad()
 
 
-def seconds_to_hms(seconds: float) -> str:
+def clean_text(text):
+    t = text.strip()
+    if len(t.split()) < 3:
+        return ""
+    if t.lower() in ["a", "uh", "um", "hm", "ah"]:
+        return ""
+    return t
+
+
+def seconds_to_hms(seconds):
     total = int(seconds)
     h = total // 3600
     m = (total % 3600) // 60
@@ -45,13 +54,13 @@ def seconds_to_hms(seconds: float) -> str:
     return f"{h}h{m:02d}m{s:02d}s"
 
 
-def twitch_ts_link(url: str, seconds: float) -> str:
+def twitch_ts_link(url, seconds):
     ts = seconds_to_hms(seconds)
     joiner = "&" if "?" in url else "?"
     return f"{url}{joiner}t={ts}"
 
 
-def _vod_direct_audio(url: str):
+def get_audio_url(url):
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
@@ -62,14 +71,11 @@ def _vod_direct_audio(url: str):
         return info.get("url"), info.get("duration")
 
 
-def _run_vod_segmenter(vod_url: str, out_tmpl: str):
-    direct, dur = _vod_direct_audio(vod_url)
+def run_segmenter(vod_url, out_template):
+    direct, dur = get_audio_url(vod_url)
 
     ffmpeg_cmd = [
         "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
         "-i",
         direct,
         "-vn",
@@ -83,28 +89,15 @@ def _run_vod_segmenter(vod_url: str, out_tmpl: str):
         str(SEGMENT_SECONDS),
         "-reset_timestamps",
         "1",
-        out_tmpl,
+        out_template,
     ]
 
     p = subprocess.Popen(ffmpeg_cmd)
     return p, dur
 
 
-def clean_text(text: str):
-    t = text.strip()
-
-    if len(t.split()) < 3:
-        return ""
-
-    if t.lower() in ["a", "uh", "um", "hm", "ah", "of"]:
-        return ""
-
-    return t
-
-
 def speech_filter(path):
     audio, sr = sf.read(str(path))
-
     audio = torch.from_numpy(audio)
 
     speech = get_speech_timestamps(
@@ -143,18 +136,32 @@ def transcribe_file(path, offset):
     return out
 
 
-def _apply_segment(job, seg):
-    job["segments"].append(seg)
+def new_job(url):
 
-    job["sse_q"].put(
-        {
-            "type": "segment",
-            "segment": seg,
-        }
-    )
+    job_id = uuid.uuid4().hex[:10]
+
+    job_dir = DATA / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    jobs[job_id] = {
+        "id": job_id,
+        "url": url,
+        "dir": job_dir,
+        "segments": [],
+        "sse_q": queue.Queue(),
+        "work_q": queue.Queue(),
+    }
+
+    threading.Thread(
+        target=segment_loop,
+        args=(job_id, url),
+        daemon=True,
+    ).start()
+
+    return job_id
 
 
-def _segment_loop(job_id, url):
+def segment_loop(job_id, url):
 
     job = jobs[job_id]
 
@@ -163,9 +170,7 @@ def _segment_loop(job_id, url):
 
     out = str(chunks_dir / "chunk_%08d.wav")
 
-    p, duration = _run_vod_segmenter(url, out)
-
-    job["duration"] = duration
+    p, duration = run_segmenter(url, out)
 
     q = job["work_q"]
 
@@ -210,7 +215,8 @@ def _segment_loop(job_id, url):
             segs = transcribe_file(wav, offset)
 
             for s in segs:
-                _apply_segment(job, s)
+                job["segments"].append(s)
+                job["sse_q"].put({"segment": s})
 
     threading.Thread(target=feeder, daemon=True).start()
 
@@ -218,49 +224,20 @@ def _segment_loop(job_id, url):
         threading.Thread(target=worker, daemon=True).start()
 
 
-def _new_job(url):
-
-    job_id = uuid.uuid4().hex[:10]
-
-    job_dir = DATA / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-
-    jobs[job_id] = {
-        "id": job_id,
-        "url": url,
-        "dir": job_dir,
-        "segments": [],
-        "sse_q": queue.Queue(),
-        "work_q": queue.Queue(),
-        "duration": None,
-    }
-
-    threading.Thread(
-        target=_segment_loop,
-        args=(job_id, url),
-        daemon=True,
-    ).start()
-
-    return job_id
-
-
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse(
-        "index.html",
-        {"request": request},
-    )
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.post("/api/start")
 async def api_start(payload: dict, response: Response):
 
-    url = (payload.get("url") or "").strip()
+    url = payload.get("url")
 
     if not url:
-        raise HTTPException(400, "Missing url")
+        raise HTTPException(400, "missing url")
 
-    job_id = _new_job(url)
+    job_id = new_job(url)
 
     response.set_cookie("job_id", job_id)
 
@@ -273,19 +250,26 @@ async def api_events(job_id: str):
     job = jobs.get(job_id)
 
     if not job:
-        raise HTTPException(404, "job not found")
+        raise HTTPException(404)
 
-    def gen():
+    def stream():
 
         q = job["sse_q"]
 
         while True:
-
             item = q.get()
-
             yield f"data: {json.dumps(item)}\n\n"
 
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8080))
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
     )
