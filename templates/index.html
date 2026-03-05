@@ -106,7 +106,7 @@
 let jobId=null, evtSrc=null, vodUrl=null, mode=null;
 const esc = (s)=> (s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const setStatus = (t)=>{ document.getElementById('status').textContent=t; };
-const setPct = (p, eta)=>{ const el=document.getElementById('pct'); if(p===null||p===undefined||Number.isNaN(p)){ el.textContent=''; return; } const pct=Math.max(0,Math.min(100,Math.round(p))); const etaTxt = (eta===null||eta===undefined||Number.isNaN(eta))?'' : ` ${fmtHHMMSS(eta)} remaining`; el.textContent = ` ${pct}%${etaTxt}`; };
+const setPct = (p)=>{ const el=document.getElementById('pct'); if(p===null||p===undefined||Number.isNaN(p)){ el.textContent=''; return; } el.textContent = ` ${Math.max(0,Math.min(100,Math.round(p)))}%`; };
 const setDot = (on)=>{ document.getElementById('dot').classList.toggle('dot-on', !!on); };
 const setModeBadge = (t)=>{ document.getElementById('modeBadge').textContent=t; };
 function fmtHHMMSS(sec){ sec=Math.max(0,Math.floor(sec)); const h=String(Math.floor(sec/3600)).padStart(2,'0'); const m=String(Math.floor((sec%3600)/60)).padStart(2,'0'); const s=String(sec%60).padStart(2,'0'); return `${h}:${m}:${s}`; }
@@ -125,7 +125,7 @@ async function start(){ const url=document.getElementById('url').value.trim(); m
   const res=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,mode,watch})}); const data=await res.json(); jobId=data.job_id; document.getElementById('stop').classList.remove('hidden');
   if(evtSrc) evtSrc.close(); evtSrc=new EventSource(`/api/events/${jobId}`);
   evtSrc.onmessage=(ev)=>{ const msg=JSON.parse(ev.data);
-    if(msg.type==='status'){ setStatus(`Status: ${msg.status}`); setPct(msg.pct, msg.eta_sec); }
+    if(msg.type==='status'){ setStatus(`Status: ${msg.status}`); setPct(msg.pct); }
     else if(msg.type==='segment'){ addTranscript(msg.segment); }
     else if(msg.type==='alert'){ addAlert(msg); }
     else if(msg.type==='sponsors'){ renderSponsors(msg.report); }
