@@ -44,3 +44,7 @@ background-size:auto,auto,auto,70px 70px,70px 70px;pointer-events:none}
 ::-webkit-scrollbar{width:10px}
 ::-webkit-scrollbar-thumb{background:#27272a;border-radius:999px}
 ::-webkit-scrollbar-track{background:transparent}
+
+/* VOD-only: keep layout but remove any visible "Mode" UI */
+.mode-ghost{visibility:hidden;}
+.mode-badge-ghost{visibility:hidden;}
