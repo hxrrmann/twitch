@@ -530,7 +530,14 @@ async def api_sponsor_report_pdf(job_id: str):
     return Response(content=pdf, media_type="application/pdf", headers=headers)
 
 
+import uvicorn
+import os
+
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", "8080"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        log_level="info"
+    )
