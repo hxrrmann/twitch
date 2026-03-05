@@ -5,3 +5,4 @@ faster-whisper==1.0.3
 yt-dlp==2025.2.19
 reportlab==4.2.2
 numpy==2.0.2
+requests==2.32.3
