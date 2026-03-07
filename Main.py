@@ -7,40 +7,52 @@ import queue
 import threading
 import subprocess
 from typing import Dict, List
+
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from faster_whisper import WhisperModel
 
 PORT = int(os.environ.get("PORT", 8080))
 
-app = FastAPI(title="Amar Stream AI")
+app = FastAPI(title="Amar Stream AI Platform")
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# serve static assets
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
-GPU_MODEL = WhisperModel(
+@app.get("/")
+def root():
+    if os.path.exists("templates/index.html"):
+        return FileResponse("templates/index.html")
+    return {"status":"running"}
+
+# GPU model
+model = WhisperModel(
     "distil-large-v3",
     device="cuda",
     compute_type="float16"
 )
 
 JOB_QUEUE = queue.Queue()
-ACTIVE_JOBS: Dict[str, dict] = {}
+JOBS: Dict[str, dict] = {}
 
-BATCH_SIZE = 4
 CHUNK_SECONDS = 40
+BATCH_SIZE = 4
 
 def eta_format(seconds):
+    if seconds <= 0:
+        return "0s"
     m = int(seconds // 60)
     s = int(seconds % 60)
     return f"{m}m {s}s"
 
-def download_stream(url, job_id, chunk_queue):
+def stream_download(url, job_id, chunk_queue):
 
     chunk_dir = f"/tmp/{job_id}"
     os.makedirs(chunk_dir, exist_ok=True)
 
-    ytdlp = ["yt-dlp", "-o", "-", url]
+    ytdlp = ["yt-dlp","-o","-",url]
 
     ffmpeg = [
         "ffmpeg",
@@ -56,11 +68,11 @@ def download_stream(url, job_id, chunk_queue):
     p2 = subprocess.Popen(ffmpeg, stdin=p1.stdout)
     p1.stdout.close()
 
-    seen = set()
+    seen=set()
 
     while True:
 
-        files = [
+        files=[
             os.path.join(chunk_dir,f)
             for f in os.listdir(chunk_dir)
             if f.endswith(".wav")
@@ -78,50 +90,51 @@ def download_stream(url, job_id, chunk_queue):
 
 def transcribe_batch(paths):
 
-    results = []
+    results=[]
 
     for p in paths:
 
-        segments, _ = GPU_MODEL.transcribe(
+        segments,_ = model.transcribe(
             p,
             beam_size=1,
             best_of=1,
             vad_filter=True
         )
 
-        text = ""
+        txt=""
 
         for s in segments:
-            text += s.text + " "
+            txt += s.text + " "
 
-        results.append(text.strip())
+        results.append(txt.strip())
 
     return results
 
-def worker_loop():
+def worker():
 
     while True:
 
-        job_id, url, alerts = JOB_QUEUE.get()
+        job_id,url,alerts = JOB_QUEUE.get()
 
-        job = ACTIVE_JOBS[job_id]
+        job = JOBS[job_id]
 
         chunk_queue = queue.Queue()
 
         dl_thread = threading.Thread(
-            target=download_stream,
-            args=(url, job_id, chunk_queue)
+            target=stream_download,
+            args=(url,job_id,chunk_queue)
         )
 
         dl_thread.start()
 
-        transcript = []
-        brands = []
+        transcript=[]
+        brands=[]
+        processed=0
+        batch=[]
 
-        processed = 0
-        batch = []
+        start=time.time()
 
-        start = time.time()
+        job["step"]="downloading"
 
         while True:
 
@@ -144,83 +157,74 @@ def worker_loop():
 
                     for w in alerts:
                         if w.lower() in t.lower():
-                            brands.append({"word": w, "text": t})
+                            brands.append({
+                                "word":w,
+                                "text":t
+                            })
 
                 processed += len(batch)
 
-                elapsed = time.time() - start
-                speed = processed / elapsed if elapsed > 0 else 0
-                eta = eta_format(60/speed if speed > 0 else 0)
+                elapsed = time.time()-start
+                speed = processed/elapsed if elapsed>0 else 0
 
-                job["percent"] = min(99, processed * 2)
-                job["eta"] = eta
+                job["percent"] = min(99, processed*2)
+                job["eta"] = eta_format((60/speed) if speed>0 else 0)
                 job["step"] = "transcribing"
                 job["transcript"] = transcript
                 job["brands"] = brands
 
-                batch = []
+                batch=[]
 
-        job["percent"] = 100
-        job["step"] = "completed"
-        job["status"] = "finished"
+        job["percent"]=100
+        job["step"]="completed"
+        job["status"]="finished"
 
-threading.Thread(target=worker_loop, daemon=True).start()
-
-@app.get("/", response_class=HTMLResponse)
-def home():
-    with open("templates/index.html") as f:
-        return f.read()
+threading.Thread(target=worker,daemon=True).start()
 
 @app.post("/api/start")
-def start(payload: dict):
+def start(payload:dict):
 
     url = payload.get("url")
     alerts = payload.get("alerts","")
 
     if not url:
-        raise HTTPException(400, "url missing")
+        raise HTTPException(400,"URL missing")
 
-    words = [x.strip() for x in alerts.split(",") if x.strip()]
+    words=[x.strip() for x in alerts.split(",") if x.strip()]
 
-    job_id = str(uuid.uuid4())
+    job_id=str(uuid.uuid4())
 
-    ACTIVE_JOBS[job_id] = {
-        "id": job_id,
-        "percent": 0,
-        "eta": "",
-        "step": "queued",
-        "status": "running",
-        "transcript": [],
-        "brands": []
+    JOBS[job_id]={
+        "id":job_id,
+        "percent":0,
+        "eta":"",
+        "step":"queued",
+        "status":"running",
+        "transcript":[],
+        "brands":[]
     }
 
-    JOB_QUEUE.put((job_id, url, words))
+    JOB_QUEUE.put((job_id,url,words))
 
-    return {"job_id": job_id}
+    return {"job_id":job_id}
 
 @app.get("/api/status/{job_id}")
 def status(job_id):
-
-    if job_id not in ACTIVE_JOBS:
+    if job_id not in JOBS:
         raise HTTPException(404)
-
-    return ACTIVE_JOBS[job_id]
+    return JOBS[job_id]
 
 @app.get("/api/transcript/{job_id}")
 def transcript(job_id):
-
-    if job_id not in ACTIVE_JOBS:
+    if job_id not in JOBS:
         raise HTTPException(404)
-
-    return ACTIVE_JOBS[job_id]["transcript"]
+    return JOBS[job_id]["transcript"]
 
 @app.get("/api/brands/{job_id}")
 def brands(job_id):
-
-    if job_id not in ACTIVE_JOBS:
+    if job_id not in JOBS:
         raise HTTPException(404)
-
-    return ACTIVE_JOBS[job_id]["brands"]
+    return JOBS[job_id]["brands"]
 
 @app.get("/api/health")
 def health():
