@@ -1,78 +1,374 @@
-
 <!DOCTYPE html>
-<html>
+<html lang="de">
 <head>
-<title>Amar Stream AI</title>
-<link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Amar Stream AI Platform</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <div class="page-shell">
+    <div class="ambient ambient-left"></div>
+    <div class="ambient ambient-right"></div>
 
-<h1>Amar Stream AI</h1>
+    <header class="topbar">
+      <div class="brand-wrap">
+        <div class="logo-box">A</div>
+        <div class="brand-copy">
+          <div class="pills">
+            <span class="pill pill-purple">AMAR</span>
+            <span class="pill pill-green">STREAM</span>
+            <span class="pill pill-blue">AI</span>
+          </div>
+          <h1>Amar Stream AI Platform</h1>
+          <p>Sponsor Reports · Brand Mentions · Instant Search · Transkript · Hidden Context · Stream Summary</p>
+        </div>
+      </div>
 
-<input id="url" placeholder="Twitch URL">
-<input id="alerts" placeholder="More Nutrition, Bitpanda">
-<button onclick="start()">Start</button>
+      <div class="status-dot-wrap">
+        <div class="live-state"><span class="live-dot"></span><span id="liveLabel">Starte</span></div>
+        <div class="vod-badge">VOD</div>
+      </div>
+    </header>
 
-<h2>Status</h2>
-<div id="status"></div>
+    <section class="hero-card">
+      <label class="field-group">
+        <span class="field-label">Twitch URL</span>
+        <div class="input-row single">
+          <input id="url" type="text" placeholder="https://www.twitch.tv/videos/...">
+        </div>
+      </label>
 
-<h2>Transcript</h2>
-<div id="transcript"></div>
+      <div class="hero-actions">
+        <button id="startBtn" class="btn btn-primary" onclick="start()">Start</button>
+        <button id="stopBtn" class="btn btn-dark" onclick="stopJob()" disabled>Stop</button>
+      </div>
 
-<h2>Summary</h2>
-<div id="summary"></div>
+      <label class="field-group">
+        <span class="field-label">Sponsor und Brand Mentions plus Alerts Komma getrennt</span>
+        <div class="input-row with-side-button">
+          <input id="alerts" type="text" placeholder="More Nutrition, Bitpanda">
+          <button class="btn btn-green" onclick="saveAlerts()">Setzen</button>
+        </div>
+        <span class="field-hint">Words werden live geloggt und in den Sponsor Report übernommen.</span>
+      </label>
+    </section>
 
-<script>
+    <main class="dashboard-grid">
+      <section class="card transcript-card">
+        <div class="card-head">
+          <h2>Transkript</h2>
+          <span class="muted">klickbare Timestamps</span>
+        </div>
+        <div id="transcript" class="transcript-list"></div>
+      </section>
 
-let job
-let es
+      <section class="stack-col">
+        <section class="card compact-card">
+          <div class="card-head compact-head">
+            <h2>Instant Search</h2>
+          </div>
+          <div class="search-row">
+            <input id="searchInput" type="text" placeholder="Wort suchen">
+            <button class="btn btn-dark" onclick="runSearch()">Suchen</button>
+          </div>
+          <div id="searchResults" class="mini-feed hidden"></div>
+        </section>
 
-async function start(){
+        <section class="card compact-card">
+          <div class="card-head compact-head">
+            <h2>Brand Mentions Feed</h2>
+          </div>
+          <div id="mentionsFeed" class="mini-feed"></div>
+        </section>
+      </section>
 
-let url=document.getElementById("url").value
-let alerts=document.getElementById("alerts").value
+      <section class="card compact-card">
+        <div class="card-head compact-head">
+          <h2>Sponsor Report</h2>
+        </div>
+        <div id="sponsorReport" class="report-list"></div>
+      </section>
 
-let r=await fetch("/api/start",{
-method:"POST",
-headers:{"Content-Type":"application/json"},
-body:JSON.stringify({url,alerts})
-})
+      <section class="card compact-card">
+        <div class="card-head compact-head">
+          <h2>Hidden Context</h2>
+        </div>
+        <div id="hiddenContext" class="context-text">Findet Kontext wie Krypto Trading Wallet Hardware auch ohne Brand Name.</div>
+      </section>
 
-let d=await r.json()
-job=d.job_id
+      <section class="card summary-card full-row">
+        <div class="card-head compact-head">
+          <h2>Stream Summary</h2>
+        </div>
+        <div id="summary" class="summary-box"></div>
+      </section>
+    </main>
+  </div>
 
-es=new EventSource("/api/events/"+job)
+  <script>
+    let job = null
+    let es = null
+    let pollTimer = null
+    let transcriptItems = []
+    let mentionItems = []
 
-es.onmessage=(e)=>{
+    const hiddenKeywords = [
+      "wallet", "krypto", "crypto", "trading", "hardware", "börse", "exchange",
+      "broker", "investment", "aktie", "bitcoin", "ethereum", "karte", "gpu", "controller"
+    ]
 
-let data=JSON.parse(e.data)
+    function setStatusLabel(text) {
+      document.getElementById("liveLabel").innerText = text
+    }
 
-if(data.type==="segment"){
-let div=document.createElement("div")
-div.innerText=data.timestamp+" "+data.text
-document.getElementById("transcript").appendChild(div)
-}
+    function setButtons(running) {
+      document.getElementById("startBtn").disabled = running
+      document.getElementById("stopBtn").disabled = !running
+    }
 
-if(data.type==="summary"){
-document.getElementById("summary").innerText=data.text
-}
+    function saveAlerts() {
+      const alerts = document.getElementById("alerts").value.trim()
+      if (!alerts) return
+      const box = document.getElementById("mentionsFeed")
+      if (!box.innerHTML.trim()) {
+        box.innerHTML = `<div class="empty-state">Alerts gesetzt: ${escapeHtml(alerts)}</div>`
+      }
+    }
 
-}
+    function resetUi() {
+      transcriptItems = []
+      mentionItems = []
+      document.getElementById("transcript").innerHTML = ""
+      document.getElementById("mentionsFeed").innerHTML = ""
+      document.getElementById("summary").innerHTML = ""
+      document.getElementById("sponsorReport").innerHTML = ""
+      document.getElementById("hiddenContext").innerHTML = "Findet Kontext wie Krypto Trading Wallet Hardware auch ohne Brand Name."
+      document.getElementById("searchResults").innerHTML = ""
+      document.getElementById("searchResults").classList.add("hidden")
+    }
 
-poll()
-}
+    function escapeHtml(value) {
+      return value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;")
+    }
 
-async function poll(){
+    function renderTranscript() {
+      const container = document.getElementById("transcript")
+      if (!transcriptItems.length) {
+        container.innerHTML = `<div class="empty-state">Noch keine Segmente.</div>`
+        return
+      }
+      container.innerHTML = transcriptItems.map(item => `
+        <article class="segment-card">
+          <div class="segment-top">
+            <strong>Segment <span>${escapeHtml(item.timestamp)}</span></strong>
+            <button class="open-link" onclick="jumpToTime('${escapeHtml(item.timestamp)}')">↗</button>
+          </div>
+          <p>${escapeHtml(item.text)}</p>
+          <button class="time-chip" onclick="jumpToTime('${escapeHtml(item.timestamp)}')">Open @ ${escapeHtml(item.timestamp)}</button>
+        </article>
+      `).join("")
+    }
 
-let r=await fetch("/api/status/"+job)
-let d=await r.json()
+    function renderMentions() {
+      const container = document.getElementById("mentionsFeed")
+      if (!mentionItems.length) {
+        container.innerHTML = `<div class="empty-state">Noch keine Brand Mentions.</div>`
+        return
+      }
+      container.innerHTML = mentionItems.slice().reverse().map(item => `
+        <div class="feed-item">
+          <div class="feed-title">${escapeHtml(item.brand)} <span>${escapeHtml(item.timestamp)}</span></div>
+          <div class="feed-text">${escapeHtml(item.text)}</div>
+        </div>
+      `).join("")
+    }
 
-document.getElementById("status").innerText=
-"step "+d.step+" percent "+d.percent+" eta "+d.eta
+    function renderSponsorReport(report) {
+      const container = document.getElementById("sponsorReport")
+      const entries = Object.entries(report || {})
+      if (!entries.length) {
+        container.innerHTML = `<div class="empty-state">Noch keine Daten.</div>`
+        return
+      }
+      container.innerHTML = entries.map(([brand, data]) => `
+        <div class="report-item">
+          <div>
+            <strong>${escapeHtml(brand)}</strong>
+            <span>${escapeHtml(data.time || "0s")}</span>
+          </div>
+          <small>${escapeHtml(String(data.seconds || 0))} Sekunden</small>
+        </div>
+      `).join("")
+    }
 
-setTimeout(poll,2000)
-}
-</script>
+    function renderHiddenContext() {
+      const container = document.getElementById("hiddenContext")
+      const hits = transcriptItems.filter(item => {
+        const lower = item.text.toLowerCase()
+        return hiddenKeywords.some(key => lower.includes(key))
+      }).slice(-6)
 
+      if (!hits.length) {
+        container.innerHTML = "Findet Kontext wie Krypto Trading Wallet Hardware auch ohne Brand Name."
+        return
+      }
+
+      container.innerHTML = hits.map(item => `
+        <div class="context-line">
+          <span>${escapeHtml(item.timestamp)}</span>
+          <p>${escapeHtml(item.text)}</p>
+        </div>
+      `).join("")
+    }
+
+    function updateStatusView(data) {
+      const state = data.status || "running"
+      if (state === "finished") setStatusLabel("Fertig")
+      else if (state === "error") setStatusLabel("Fehler")
+      else if (state === "stopped") setStatusLabel("Gestoppt")
+      else if (state === "stopping") setStatusLabel("Stoppt")
+      else setStatusLabel("Läuft")
+
+      if (data.sponsor_talktime) renderSponsorReport(data.sponsor_talktime)
+      if (data.summary) document.getElementById("summary").innerText = data.summary
+      if (data.error) {
+        document.getElementById("summary").innerText = data.error
+      }
+    }
+
+    async function start() {
+      const url = document.getElementById("url").value.trim()
+      const alerts = document.getElementById("alerts").value.trim()
+      if (!url) return
+
+      resetUi()
+      setButtons(true)
+      setStatusLabel("Starte")
+
+      if (es) es.close()
+      if (pollTimer) clearTimeout(pollTimer)
+
+      const r = await fetch("/api/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, alerts })
+      })
+
+      if (!r.ok) {
+        setButtons(false)
+        setStatusLabel("Fehler")
+        document.getElementById("summary").innerText = "Start fehlgeschlagen."
+        return
+      }
+
+      const d = await r.json()
+      job = d.job_id
+
+      es = new EventSource("/api/events/" + job)
+
+      es.onmessage = (e) => {
+        const data = JSON.parse(e.data)
+
+        if (data.type === "segment") {
+          transcriptItems.push({ timestamp: data.timestamp, text: data.text, seconds: data.seconds || 0 })
+          renderTranscript()
+          renderHiddenContext()
+        }
+
+        if (data.type === "mention") {
+          mentionItems.push(data)
+          renderMentions()
+        }
+
+        if (data.type === "summary") {
+          document.getElementById("summary").innerText = data.text || ""
+          renderSponsorReport(data.sponsor_talktime || {})
+          setButtons(false)
+          setStatusLabel("Fertig")
+        }
+
+        if (data.type === "status") {
+          updateStatusView(data)
+          if (["finished", "error", "stopped"].includes(data.status)) {
+            setButtons(false)
+          }
+        }
+
+        if (data.type === "error") {
+          document.getElementById("summary").innerText = data.message || "Unbekannter Fehler"
+          setStatusLabel("Fehler")
+          setButtons(false)
+        }
+      }
+
+      es.onerror = () => {
+        setStatusLabel("Verbindung")
+      }
+
+      poll()
+    }
+
+    async function stopJob() {
+      if (!job) return
+      await fetch("/api/stop/" + job, { method: "POST" })
+      setStatusLabel("Stoppt")
+      setButtons(false)
+    }
+
+    async function poll() {
+      if (!job) return
+      try {
+        const r = await fetch("/api/status/" + job)
+        const d = await r.json()
+        updateStatusView(d)
+        if (["finished", "error", "stopped"].includes(d.status)) return
+      } catch (err) {
+      }
+      pollTimer = setTimeout(poll, 2000)
+    }
+
+    function runSearch() {
+      const q = document.getElementById("searchInput").value.trim().toLowerCase()
+      const box = document.getElementById("searchResults")
+      box.classList.remove("hidden")
+
+      if (!q) {
+        box.innerHTML = `<div class="empty-state">Bitte Suchwort eingeben.</div>`
+        return
+      }
+
+      const results = transcriptItems.filter(item => item.text.toLowerCase().includes(q)).slice(-8).reverse()
+
+      if (!results.length) {
+        box.innerHTML = `<div class="empty-state">Keine Treffer gefunden.</div>`
+        return
+      }
+
+      box.innerHTML = results.map(item => `
+        <div class="feed-item">
+          <div class="feed-title">Treffer <span>${escapeHtml(item.timestamp)}</span></div>
+          <div class="feed-text">${escapeHtml(item.text)}</div>
+        </div>
+      `).join("")
+    }
+
+    function jumpToTime(timestamp) {
+      const url = document.getElementById("url").value.trim()
+      if (!url) return
+      const parts = timestamp.split(":").map(Number)
+      const total = parts[0] * 3600 + parts[1] * 60 + parts[2]
+      window.open(url + "?t=" + total + "s", "_blank")
+    }
+
+    renderTranscript()
+    renderMentions()
+    renderSponsorReport({})
+  </script>
 </body>
 </html>
