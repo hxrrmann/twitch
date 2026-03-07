@@ -7,24 +7,30 @@ import queue
 import threading
 import subprocess
 from typing import Dict, List
-from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from faster_whisper import WhisperModel
 
-app = FastAPI(title="Amar Stream AI Ultra")
+app = FastAPI(title="Amar Stream AI Ultra Fixed")
 
+# serve static ui
 if os.path.exists("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# root route so browser does not return Not Found
+@app.get("/")
+def root():
+    if os.path.exists("static/index.html"):
+        return FileResponse("static/index.html")
+    return {"status": "server running"}
+
 TMP_DIR = "/tmp"
 DATA_DIR = "data"
-
 os.makedirs(DATA_DIR, exist_ok=True)
 
 CPU_COUNT = os.cpu_count() or 8
-WORKERS = CPU_COUNT
 BATCH_SIZE = 6
 CHUNK_SECONDS = 40
 
@@ -61,13 +67,13 @@ def stream_download_and_split(url, job_id, chunk_queue):
     chunk_dir=f"{TMP_DIR}/{job_id}_chunks"
     os.makedirs(chunk_dir,exist_ok=True)
 
-    cmd = [
+    cmd=[
         "yt-dlp",
         "-o","-",
         url
     ]
 
-    ffmpeg = [
+    ffmpeg=[
         "ffmpeg",
         "-loglevel","quiet",
         "-i","pipe:0",
@@ -79,8 +85,9 @@ def stream_download_and_split(url, job_id, chunk_queue):
 
     p1=subprocess.Popen(cmd,stdout=subprocess.PIPE)
     p2=subprocess.Popen(ffmpeg,stdin=p1.stdout)
-
     p1.stdout.close()
+
+    known=set()
 
     while True:
 
@@ -91,7 +98,8 @@ def stream_download_and_split(url, job_id, chunk_queue):
         ]
 
         for f in sorted(files):
-            if f not in chunk_queue.queue:
+            if f not in known:
+                known.add(f)
                 chunk_queue.put(f)
 
         if p2.poll() is not None:
@@ -101,7 +109,7 @@ def stream_download_and_split(url, job_id, chunk_queue):
 
 def batch_transcribe(paths):
 
-    segments_all=[]
+    results=[]
 
     for p in paths:
         segments,_=model.transcribe(
@@ -110,12 +118,14 @@ def batch_transcribe(paths):
             best_of=1,
             vad_filter=True
         )
+
         txt=""
         for s in segments:
             txt+=s.text+" "
-        segments_all.append(txt.strip())
 
-    return segments_all
+        results.append(txt.strip())
+
+    return results
 
 def process_vod(job_id,url,alerts):
 
@@ -132,11 +142,10 @@ def process_vod(job_id,url,alerts):
 
     transcript=[]
     brands=[]
+    processed=0
+    batch=[]
 
     start=time.time()
-    processed=0
-
-    batch=[]
 
     while True:
 
@@ -168,8 +177,11 @@ def process_vod(job_id,url,alerts):
 
             elapsed=time.time()-start
             speed=processed/elapsed if elapsed>0 else 0
+
             job["progress"]=processed
+            job["percent"]=min(99, processed*2)
             job["eta"]=eta_format(60/speed if speed>0 else 0)
+            job["step"]="transcribing"
             job["transcript"]=transcript
             job["brands"]=brands
 
@@ -177,8 +189,9 @@ def process_vod(job_id,url,alerts):
 
             batch=[]
 
+    job["percent"]=100
     job["status"]="finished"
-    job["step"]="Completed"
+    job["step"]="completed"
     job["transcript"]=transcript
 
     save_job(job_id)
@@ -199,9 +212,10 @@ def start(payload:dict):
     jobs[job_id]={
         "id":job_id,
         "status":"running",
+        "percent":0,
         "progress":0,
         "eta":"",
-        "step":"Starting",
+        "step":"starting",
         "transcript":[],
         "brands":[]
     }
