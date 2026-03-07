@@ -18,14 +18,14 @@
           <span class="chip">AMAR</span><span class="chip chip2">STREAM</span><span class="chip chip3">AI</span>
         </div>
         <h1 class="text-3xl md:text-4xl font-semibold tracking-tight">Amar Stream AI Platform</h1>
-        <p class="text-zinc-400 mt-2 max-w-2xl">Sponsor Reports · Brand Mentions · Instant Search · Transkript · Hidden Context · Stream Summary</p>
+        <p class="text-zinc-400 mt-2 max-w-2xl">Sponsor Reports · Brand Mentions · Instant Search · Hidden Context · Stream Summary</p>
       </div>
     </div>
     <div class="text-sm text-zinc-400">
       <div class="flex items-center gap-2 justify-start lg:justify-end">
         <span class="dot" id="dot"></span>
         <span id="status">Bereit.</span>
-        <span id="pct" class="muted"></span>
+        <span id="pct" class="muted"></span><span id="eta" class="muted"></span>
       </div>
       <div class="mt-2 flex flex-wrap gap-2 justify-start lg:justify-end">
         <span class="badge" id="modeBadge">—</span>
@@ -35,11 +35,11 @@
 
   <section class="card p-5">
     <div class="grid lg:grid-cols-12 gap-4 items-end">
-      <div class="lg:col-span-9">
+      <div class="lg:col-span-7">
         <label class="label">Twitch URL</label>
         <input id="url" class="input" placeholder="https://www.twitch.tv/videos/... oder https://www.twitch.tv/amar" />
       </div>
-<div class="lg:col-span-3 flex gap-2">
+      <div class="lg:col-span-5 flex gap-2">
         <button id="start" class="btn btn-primary flex-1">Start</button>
         <button id="stop" class="btn btn-ghost hidden">Stop</button>
       </div>
@@ -49,14 +49,14 @@
           <input id="alertsInput" class="input flex-1" placeholder="More Nutrition, Bitpanda" />
           <button id="alertsBtn" class="btn btn-secondary">Setzen</button>
         </div>
-        <p class="hint">Words werden live geloggt und in den Sponsor Report übernommen.</p>
+        <p class="hint">Words werden geloggt und in den Sponsor Report übernommen.</p>
       </div>
     </div>
   </section>
 
   <div class="grid lg:grid-cols-12 gap-6 mt-8">
     <section class="card lg:col-span-6 p-5">
-      <div class="flex items-center justify-between mb-3"><h2 class="title">Transkript</h2><span class="hint">klickbare Timestamps</span></div>
+      <div class="flex items-center justify-between mb-3"><h2 class="title">Transkript</h2><span class="hint">klickbare Timestamps bei VOD</span></div>
       <div id="transcript" class="panel h-96 overflow-auto pr-2"></div>
     </section>
 
@@ -99,29 +99,30 @@
 </div>
 
 <script>
-let jobId=null, evtSrc=null, vodUrl=null; const mode='vod';
+let jobId=null, evtSrc=null, vodUrl=null;
 const esc = (s)=> (s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const setStatus = (t)=>{ document.getElementById('status').textContent=t; };
-const setPct = (p, eta)=>{ const el=document.getElementById('pct'); if(p===null||p===undefined||Number.isNaN(p)){ el.textContent=''; return; } const pct=Math.max(0,Math.min(100,Math.round(p))); const etaTxt = (eta===null||eta===undefined||Number.isNaN(eta))?'' : ` ${fmtHHMMSS(eta)} remaining`; el.textContent = ` ${pct}%${etaTxt}`; };
+const setPct = (p)=>{ const el=document.getElementById('pct'); if(p===null||p===undefined||Number.isNaN(p)){ el.textContent=''; return; } el.textContent = ` ${Math.max(0,Math.min(100,Math.round(p)))}%`; };
+const setEta=(s)=>{ const el=document.getElementById('eta'); if(s===null||s===undefined||s===''){ el.textContent=''; return; } const m=Math.floor(s/60); const r=Math.floor(s%60); el.textContent=` · ca. ${m}:${String(r).padStart(2,'0')}`; };
 const setDot = (on)=>{ document.getElementById('dot').classList.toggle('dot-on', !!on); };
 const setModeBadge = (t)=>{ document.getElementById('modeBadge').textContent=t; };
 function fmtHHMMSS(sec){ sec=Math.max(0,Math.floor(sec)); const h=String(Math.floor(sec/3600)).padStart(2,'0'); const m=String(Math.floor((sec%3600)/60)).padStart(2,'0'); const s=String(sec%60).padStart(2,'0'); return `${h}:${m}:${s}`; }
 function tsLink(start){ if(!vodUrl) return null; const h=Math.floor(start/3600); const m=Math.floor((start%3600)/60); const s=Math.floor(start%60); const t=`${h}h${String(m).padStart(2,'0')}m${String(s).padStart(2,'0')}s`; return vodUrl + (vodUrl.includes('?')?'&':'?') + 't=' + t; }
-function row({title,time,text,link,metaHtml=""}){ const div=document.createElement('div'); div.className="row"; const a=link?`<a class="link" target="_blank" href="${link}">↗</a>`:`<span class="muted">LIVE</span>`; div.innerHTML=`<div class="row-top"><div class="row-title">${esc(title)} <span class="muted">${esc(time||"")}</span></div><div class="row-actions">${a}</div></div><div class="row-text">${esc(text||"")}</div>${metaHtml?`<div class="row-meta">${metaHtml}</div>`:""}`; return div; }
+function row({title,time,text,link,metaHtml=""}){ const div=document.createElement('div'); div.className="row"; const a=link?`<a class="link" target="_blank" href="${link}">↗</a>`:`<span class="muted">—</span>`; div.innerHTML=`<div class="row-top"><div class="row-title">${esc(title)} <span class="muted">${esc(time||"")}</span></div><div class="row-actions">${a}</div></div><div class="row-text">${esc(text||"")}</div>${metaHtml?`<div class="row-meta">${metaHtml}</div>`:""}`; return div; }
 function pill(t, cls="pill"){ return `<span class="${cls}">${esc(t)}</span>`; }
-function addTranscript(seg){ const box=document.getElementById('transcript'); const start=seg.start??0; const link=tsLink(start); const meta=link?`<a class="pill" target="_blank" href="${link}">Open @ ${fmtHHMMSS(start)}</a>`:`<span class="pill">LIVE @ ${fmtHHMMSS(start)}</span>`; box.appendChild(row({title:"Segment",time:fmtHHMMSS(start),text:seg.text,link,metaHtml:meta})); box.scrollTop=box.scrollHeight; }
+function addTranscript(seg){ const box=document.getElementById('transcript'); const start=seg.start??0; const link=tsLink(start); const meta=link?`<a class="pill" target="_blank" href="${link}">Open @ ${fmtHHMMSS(start)}</a>`:`<span class="pill">@ ${fmtHHMMSS(start)}</span>`; box.appendChild(row({title:"Segment",time:fmtHHMMSS(start),text:seg.text,link,metaHtml:meta})); box.scrollTop=box.scrollHeight; }
 function renderResults(results){ const box=document.getElementById('results'); box.innerHTML=""; if(!results||!results.length){ box.innerHTML=`<div class="hint">Keine Treffer.</div>`; return; } for(const r of results){ const link=r.link||tsLink(r.start||0); box.appendChild(row({title:"Match",time:r.time||fmtHHMMSS(r.start||0),text:r.text,link})); } }
 function addAlert(a){ const link=a.link||tsLink(a.start||0); const meta=pill(`Keyword: ${a.word||""}`); document.getElementById('alertsBox').prepend(row({title:"Mention",time:a.time||fmtHHMMSS(a.start||0),text:a.text,link,metaHtml:meta})); }
 function renderSponsors(report){ const el=document.getElementById('sponsorReport'); el.innerHTML=""; const keys=Object.keys(report||{}); if(!keys.length){ el.innerHTML=`<div class="hint">Füge Brands in Alerts ein dann erscheint hier automatisch der Report.</div>`; return; } for(const k of keys){ const r=report[k]; const meta=`${pill(`Mentions: ${r.mentions}`)} ${pill(`Talktime: ${r.total_talktime_sec}s`)}`; const head=row({title:`${k}`,time:"",text:"",link:null,metaHtml:meta}); const list=document.createElement('div'); list.className="mt-3 space-y-2"; (r.hits||[]).slice(0,25).forEach(h=>{ const link=h.link||tsLink(h.start||0); list.appendChild(row({title:"Mention",time:h.time||fmtHHMMSS(h.start||0),text:h.text,link})); }); head.appendChild(list); el.appendChild(head); } }
 function renderHidden(items){ const el=document.getElementById('hiddenSponsor'); el.innerHTML=""; if(!items||!items.length){ el.innerHTML=`<div class="hint">Wird nach dem Transkript gefüllt.</div>`; return; } items.slice(0,60).forEach(it=>{ const link=it.link||tsLink(it.start||0); const meta=pill(`Context: ${it.context}`); el.appendChild(row({title:"Context",time:it.time||fmtHHMMSS(it.start||0),text:it.text,link,metaHtml:meta})); }); }
 function renderSummary(s){ document.getElementById('summary').textContent = JSON.stringify(s||{}, null, 2); }
 
-async function start(){ const url=document.getElementById('url').value.trim(); /* mode fixed to VOD */ const watchRaw=document.getElementById('alertsInput').value||""; const watch=watchRaw.split(',').map(s=>s.trim()).filter(Boolean); if(!url){ setStatus("Bitte URL eingeben."); return; } vodUrl=url; setDot(true); setModeBadge(mode.toUpperCase()); setStatus("Starte"); setPct(null);
+async function start(){ const url=document.getElementById('url').value.trim(); const watchRaw=document.getElementById('alertsInput').value||""; const watch=watchRaw.split(',').map(s=>s.trim()).filter(Boolean); if(!url){ setStatus("Bitte URL eingeben."); return; } vodUrl=url; setDot(true); setModeBadge('VOD'); setStatus('Starte'); setPct(null); setEta(null);
   document.getElementById('transcript').innerHTML=""; document.getElementById('results').innerHTML=""; document.getElementById('alertsBox').innerHTML=""; document.getElementById('sponsorReport').innerHTML=""; document.getElementById('hiddenSponsor').innerHTML=""; document.getElementById('summary').textContent="";
-  const res=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,mode:'vod',watch})}); const data=await res.json(); jobId=data.job_id; document.getElementById('stop').classList.remove('hidden');
+  const res=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,watch})}); const data=await res.json(); jobId=data.job_id; document.getElementById('stop').classList.remove('hidden');
   if(evtSrc) evtSrc.close(); evtSrc=new EventSource(`/api/events/${jobId}`);
   evtSrc.onmessage=(ev)=>{ const msg=JSON.parse(ev.data);
-    if(msg.type==='status'){ setStatus(`Status: ${msg.status}`); setPct(msg.pct, msg.eta_sec); }
+    if(msg.type==='status'){ setStatus(`Status: ${msg.status}`); setPct(msg.pct); setEta(msg.eta); }
     else if(msg.type==='segment'){ addTranscript(msg.segment); }
     else if(msg.type==='alert'){ addAlert(msg); }
     else if(msg.type==='sponsors'){ renderSponsors(msg.report); }
