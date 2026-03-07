@@ -1,12 +1,13 @@
-FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY . /app
 
-ENV PYTHONUNBUFFERED=1
-EXPOSE 8080
-CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"
+RUN apt-get update && apt-get install -y     ffmpeg     python3     python3-pip
+
+COPY requirements.txt .
+RUN pip3 install -r requirements.txt
+
+COPY . .
+
+CMD ["python3","Main.py"]

@@ -1,15 +1,8 @@
-Amar Stream AI Platform (Backend)
 
-Features:
-- Faster Whisper transcription
-- Parallel chunk processing
-- Progress + ETA
-- Brand alerts
-- Sentence reconstruction
-- Language correction
-- Resume jobs via JSON
-- Cloud Run compatible
+Amar Stream AI Ultra
 
-Run locally:
-pip install -r requirements.txt
-python Main.py
+Features
+GPU whisper
+stream transcription during download
+silence filtering
+batch processing
