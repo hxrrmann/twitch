@@ -1,20 +1,22 @@
 
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-<title>Amar Stream AI</title>
+<meta charset="utf-8"/>
+<title>Amar Stream AI Platform</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<h1>Amar Stream AI</h1>
+<h1>Amar Stream AI Platform</h1>
 
-<input id="url" placeholder="Twitch url">
-<input id="alerts" placeholder="brand words">
+<input id="url" placeholder="Twitch URL">
+<input id="alerts" placeholder="More Nutrition, Bitpanda">
 <button onclick="start()">Start</button>
 
 <div id="status"></div>
 
 <script>
+
 let job=null
 
 async function start(){
@@ -45,6 +47,7 @@ document.getElementById("status").innerText =
 
 setTimeout(poll,2000)
 }
+
 </script>
 </body>
 </html>
