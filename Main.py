@@ -1,4 +1,3 @@
-
 import os
 import uuid
 import time
@@ -20,13 +19,11 @@ if os.path.exists("static"):
 
 @app.get("/")
 def home():
-    return FileResponse("templates/index.html")
+    if os.path.exists("templates/index.html"):
+        return FileResponse("templates/index.html")
+    return FileResponse("index.html")
 
-model=WhisperModel(
-    "distil-large-v3",
-    device="cuda",
-    compute_type="float16"
-)
+model=None
 
 JOB_QUEUE=queue.Queue()
 JOBS:Dict[str,dict]={}
@@ -121,6 +118,15 @@ def download_stream(url,job_id,chunk_queue):
         time.sleep(1)
 
 def transcribe_batch(paths):
+
+    global model
+
+    if model is None:
+        model=WhisperModel(
+            "distil-large-v3",
+            device="cuda",
+            compute_type="float16"
+        )
 
     segs=[]
 
@@ -262,7 +268,7 @@ async def events(job_id):
         q=STREAMS[job_id]
         while True:
             data=await q.get()
-            yield f"data: {json.dumps(data)}\\n\\n"
+            yield f"data: {json.dumps(data)}\n\n"
 
     return StreamingResponse(gen(),media_type="text/event-stream")
 
