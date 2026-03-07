@@ -1,6 +1,5 @@
-
 fastapi
-uvicorn
+uvicorn[standard]
 faster-whisper
 yt-dlp
 ffmpeg-python
