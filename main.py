@@ -1,5 +1,4 @@
 import os
-import re
 import uuid
 import time
 import json
@@ -7,7 +6,7 @@ import queue
 import asyncio
 import threading
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, List
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException
@@ -17,94 +16,61 @@ from faster_whisper import WhisperModel
 
 app = FastAPI(title="Amar Stream AI")
 
-STATIC_DIR = "static" if os.path.isdir("static") else "."
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 @app.get("/")
 def home():
-    if os.path.exists("templates/index.html"):
-        return FileResponse("templates/index.html")
-    if os.path.exists("index.html"):
-        return FileResponse("index.html")
-    raise HTTPException(500, "index file missing")
+    return FileResponse("templates/index.html")
 
 
-MODEL: Optional[WhisperModel] = None
+MODEL = None
 MODEL_LOCK = threading.Lock()
 
-JOB_QUEUE: "queue.Queue[str]" = queue.Queue()
+JOB_QUEUE = queue.Queue()
 JOBS: Dict[str, dict] = {}
 STREAMS: Dict[str, asyncio.Queue] = {}
 
+MAX_STREAMS = 5
 CHUNK_SECONDS = 30
-BATCH_SIZE = 8
-MAX_PARALLEL_STREAMS = 3
+BATCH_SIZE = 6
 
-TRANSCRIBE_POOL = ThreadPoolExecutor(max_workers=3)
-
-AUDIO_RATE = 16000
+EXECUTOR = ThreadPoolExecutor(max_workers=5)
 
 
-def get_model() -> WhisperModel:
+def get_model():
+
     global MODEL
-    with MODEL_LOCK:
-        if MODEL is None:
-            device = os.environ.get("WHISPER_DEVICE", "cuda")
-            compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")
 
-            try:
+    with MODEL_LOCK:
+
+        if MODEL is None:
+
+            device = os.environ.get("WHISPER_DEVICE", "cpu")
+
+            if device == "cuda":
+
                 MODEL = WhisperModel(
                     "distil-large-v3",
-                    device=device,
-                    compute_type=compute_type
+                    device="cuda",
+                    compute_type="float16"
                 )
-            except Exception:
+
+            else:
+
                 MODEL = WhisperModel(
                     "distil-large-v3",
                     device="cpu",
                     compute_type="int8"
                 )
 
-        return MODEL
+    return MODEL
 
 
-def sanitize_alerts(alerts: str) -> List[str]:
-    return [x.strip() for x in alerts.split(",") if x.strip()]
-
-
-def twitch_ts(sec: float) -> str:
-    total = max(0, int(sec))
-    h = total // 3600
-    m = (total % 3600) // 60
-    s = total % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-
-def eta_format(sec: float) -> str:
-    if sec <= 0:
-        return "0s"
-    m = int(sec // 60)
-    s = int(sec % 60)
-    if m <= 0:
-        return f"{s}s"
-    return f"{m}m {s}s"
-
-
-def parse_chunk_offset(path: str) -> int:
-    m = re.search(r"chunk_(\d+)\.wav$", path)
-    if not m:
-        return 0
-    return int(m.group(1)) * CHUNK_SECONDS
-
-
-async def push(job_id: str, data: dict):
-    if job_id in STREAMS:
-        await STREAMS[job_id].put(data)
-
-
-def download_stream(url: str, job_id: str, chunk_queue: queue.Queue):
+def download_stream(url, job_id, chunk_queue):
 
     chunk_dir = f"/tmp/{job_id}"
+
     os.makedirs(chunk_dir, exist_ok=True)
 
     ytdlp = [
@@ -122,11 +88,10 @@ def download_stream(url: str, job_id: str, chunk_queue: queue.Queue):
         "-i", "pipe:0",
         "-vn",
         "-ac", "1",
-        "-ar", str(AUDIO_RATE),
+        "-ar", "16000",
         "-c:a", "pcm_s16le",
         "-f", "segment",
         "-segment_time", str(CHUNK_SECONDS),
-        "-reset_timestamps", "1",
         f"{chunk_dir}/chunk_%03d.wav"
     ]
 
@@ -140,16 +105,14 @@ def download_stream(url: str, job_id: str, chunk_queue: queue.Queue):
 
     while True:
 
-        try:
-            files = [
-                os.path.join(chunk_dir, f)
-                for f in os.listdir(chunk_dir)
-                if f.endswith(".wav")
-            ]
-        except:
-            files = []
+        files = [
+            os.path.join(chunk_dir, f)
+            for f in os.listdir(chunk_dir)
+            if f.endswith(".wav")
+        ]
 
         for f in sorted(files):
+
             if f not in seen:
                 seen.add(f)
                 chunk_queue.put(f)
@@ -160,40 +123,42 @@ def download_stream(url: str, job_id: str, chunk_queue: queue.Queue):
         time.sleep(1)
 
 
-def transcribe_batch(paths: List[str]) -> List[dict]:
+def transcribe_batch(paths):
 
     model = get_model()
 
-    segments_out: List[dict] = []
+    segments_out = []
 
-    for path in paths:
-
-        offset = parse_chunk_offset(path)
+    for p in paths:
 
         segments, _ = model.transcribe(
-            path,
+            p,
             beam_size=1,
             best_of=1,
             vad_filter=True
         )
 
-        for seg in segments:
+        for s in segments:
 
-            text = seg.text.strip()
+            text = s.text.strip()
 
             if not text:
                 continue
 
-            start = offset + float(seg.start)
-            end = offset + float(seg.end)
-
             segments_out.append({
                 "text": text,
-                "start": start,
-                "end": end
+                "start": s.start,
+                "end": s.end
             })
 
     return segments_out
+
+
+async def push(job_id, data):
+
+    if job_id in STREAMS:
+
+        await STREAMS[job_id].put(data)
 
 
 def process_batch(job_id, batch, alerts, transcript, talktime):
@@ -204,13 +169,12 @@ def process_batch(job_id, batch, alerts, transcript, talktime):
 
         transcript.append(seg)
 
-        ts = twitch_ts(seg["start"])
+        ts = int(seg["start"])
 
         asyncio.run(push(job_id, {
             "type": "segment",
             "text": seg["text"],
-            "timestamp": ts,
-            "seconds": seg["start"]
+            "timestamp": ts
         }))
 
         text_lower = seg["text"].lower()
@@ -226,14 +190,15 @@ def process_batch(job_id, batch, alerts, transcript, talktime):
                 asyncio.run(push(job_id, {
                     "type": "mention",
                     "brand": alert,
-                    "timestamp": ts,
-                    "text": seg["text"]
+                    "text": seg["text"],
+                    "timestamp": ts
                 }))
 
 
 def stream_worker(job_id):
 
     job = JOBS[job_id]
+
     url = job["url"]
     alerts = job["alerts"]
 
@@ -256,16 +221,19 @@ def stream_worker(job_id):
 
         try:
             chunk = chunk_queue.get(timeout=5)
+
         except:
+
             if not dl.is_alive():
                 break
+
             continue
 
         batch.append(chunk)
 
         if len(batch) >= BATCH_SIZE:
 
-            TRANSCRIBE_POOL.submit(
+            EXECUTOR.submit(
                 process_batch,
                 job_id,
                 batch.copy(),
@@ -276,7 +244,7 @@ def stream_worker(job_id):
 
             batch = []
 
-    summary = " ".join(x["text"] for x in transcript)[:1200]
+    summary = " ".join(x["text"] for x in transcript)[:1500]
 
     asyncio.run(push(job_id, {
         "type": "summary",
@@ -297,26 +265,29 @@ def scheduler():
         ).start()
 
 
-for _ in range(MAX_PARALLEL_STREAMS):
+for _ in range(MAX_STREAMS):
     threading.Thread(target=scheduler, daemon=True).start()
 
 
 @app.post("/api/start")
 def start(payload: dict):
 
-    url = (payload.get("url") or "").strip()
+    url = payload.get("url")
 
-    alerts = sanitize_alerts(payload.get("alerts", ""))
+    alerts = payload.get("alerts", "")
 
     if not url:
-        raise HTTPException(400, "url missing")
+
+        raise HTTPException(400)
+
+    alerts_list = [x.strip() for x in alerts.split(",") if x.strip()]
 
     job_id = str(uuid.uuid4())
 
     JOBS[job_id] = {
         "id": job_id,
         "url": url,
-        "alerts": alerts
+        "alerts": alerts_list
     }
 
     STREAMS[job_id] = asyncio.Queue()
@@ -327,10 +298,7 @@ def start(payload: dict):
 
 
 @app.get("/api/events/{job_id}")
-async def events(job_id: str):
-
-    if job_id not in STREAMS:
-        raise HTTPException(404)
+async def events(job_id):
 
     async def gen():
 
@@ -347,12 +315,14 @@ async def events(job_id: str):
 
 @app.get("/api/health")
 def health():
+
     return {"status": "ok"}
 
 
 import uvicorn
-import os
 
 if __name__ == "__main__":
+
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
