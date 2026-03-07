@@ -4,57 +4,89 @@ import uuid
 import time
 import json
 import queue
+import asyncio
 import threading
 import subprocess
 from typing import Dict, List
-
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from faster_whisper import WhisperModel
 
-PORT = int(os.environ.get("PORT", 8080))
+app=FastAPI(title="Amar Stream AI")
 
-app = FastAPI(title="Amar Stream AI Platform")
-
-# serve static assets
 if os.path.exists("static"):
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+    app.mount("/static",StaticFiles(directory="static"),name="static")
 
 @app.get("/")
-def root():
-    if os.path.exists("templates/index.html"):
-        return FileResponse("templates/index.html")
-    return {"status":"running"}
+def home():
+    return FileResponse("templates/index.html")
 
-# GPU model
-model = WhisperModel(
+model=WhisperModel(
     "distil-large-v3",
     device="cuda",
     compute_type="float16"
 )
 
-JOB_QUEUE = queue.Queue()
-JOBS: Dict[str, dict] = {}
+JOB_QUEUE=queue.Queue()
+JOBS:Dict[str,dict]={}
+STREAMS:Dict[str,asyncio.Queue]={}
 
-CHUNK_SECONDS = 40
-BATCH_SIZE = 4
+CHUNK_SECONDS=30
+BATCH_SIZE=4
 
-def eta_format(seconds):
-    if seconds <= 0:
-        return "0s"
-    m = int(seconds // 60)
-    s = int(seconds % 60)
+def twitch_ts(sec):
+    h=int(sec//3600)
+    m=int((sec%3600)//60)
+    s=int(sec%60)
+    return f"{h}h{m}m{s}s"
+
+def eta_format(sec):
+    if sec<=0: return "0s"
+    m=int(sec//60)
+    s=int(sec%60)
     return f"{m}m {s}s"
 
-def stream_download(url, job_id, chunk_queue):
+def llm_summary(text):
 
-    chunk_dir = f"/tmp/{job_id}"
-    os.makedirs(chunk_dir, exist_ok=True)
+    provider=os.environ.get("LLM_PROVIDER","none")
 
-    ytdlp = ["yt-dlp","-o","-",url]
+    if provider=="openai":
+        try:
+            from openai import OpenAI
+            client=OpenAI()
+            r=client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role":"user","content":"summarize this stream: "+text[:6000]}]
+            )
+            return r.choices[0].message.content
+        except:
+            pass
 
-    ffmpeg = [
+    if provider=="anthropic":
+        try:
+            import anthropic
+            client=anthropic.Anthropic()
+            r=client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=300,
+                messages=[{"role":"user","content":"summarize this stream: "+text[:6000]}]
+            )
+            return r.content[0].text
+        except:
+            pass
+
+    words=text.split()[:120]
+    return " ".join(words)
+
+def download_stream(url,job_id,chunk_queue):
+
+    chunk_dir=f"/tmp/{job_id}"
+    os.makedirs(chunk_dir,exist_ok=True)
+
+    ytdlp=["yt-dlp","-o","-",url]
+
+    ffmpeg=[
         "ffmpeg",
         "-loglevel","quiet",
         "-i","pipe:0",
@@ -64,8 +96,8 @@ def stream_download(url, job_id, chunk_queue):
         f"{chunk_dir}/chunk_%03d.wav"
     ]
 
-    p1 = subprocess.Popen(ytdlp, stdout=subprocess.PIPE)
-    p2 = subprocess.Popen(ffmpeg, stdin=p1.stdout)
+    p1=subprocess.Popen(ytdlp,stdout=subprocess.PIPE)
+    p2=subprocess.Popen(ffmpeg,stdin=p1.stdout)
     p1.stdout.close()
 
     seen=set()
@@ -90,88 +122,90 @@ def stream_download(url, job_id, chunk_queue):
 
 def transcribe_batch(paths):
 
-    results=[]
+    segs=[]
 
     for p in paths:
 
-        segments,_ = model.transcribe(
+        segments,_=model.transcribe(
             p,
             beam_size=1,
             best_of=1,
             vad_filter=True
         )
 
-        txt=""
-
         for s in segments:
-            txt += s.text + " "
+            segs.append({"text":s.text.strip(),"start":s.start,"end":s.end})
 
-        results.append(txt.strip())
+    return segs
 
-    return results
+async def push(job_id,data):
+    if job_id in STREAMS:
+        await STREAMS[job_id].put(data)
 
 def worker():
 
     while True:
 
-        job_id,url,alerts = JOB_QUEUE.get()
+        job_id,url,alerts=JOB_QUEUE.get()
+        job=JOBS[job_id]
 
-        job = JOBS[job_id]
+        chunk_queue=queue.Queue()
 
-        chunk_queue = queue.Queue()
-
-        dl_thread = threading.Thread(
-            target=stream_download,
+        dl=threading.Thread(
+            target=download_stream,
             args=(url,job_id,chunk_queue)
         )
-
-        dl_thread.start()
+        dl.start()
 
         transcript=[]
-        brands=[]
+        talktime={}
         processed=0
         batch=[]
 
         start=time.time()
 
-        job["step"]="downloading"
-
         while True:
 
             try:
-                chunk = chunk_queue.get(timeout=5)
+                chunk=chunk_queue.get(timeout=5)
             except:
-                if not dl_thread.is_alive():
+                if not dl.is_alive():
                     break
                 continue
 
             batch.append(chunk)
 
-            if len(batch) >= BATCH_SIZE:
+            if len(batch)>=BATCH_SIZE:
 
-                texts = transcribe_batch(batch)
+                segs=transcribe_batch(batch)
 
-                for t in texts:
+                for s in segs:
 
-                    transcript.append(t)
+                    transcript.append(s["text"])
+
+                    ts=twitch_ts(s["start"])
+
+                    asyncio.run(push(job_id,{
+                        "type":"segment",
+                        "text":s["text"],
+                        "timestamp":ts
+                    }))
 
                     for w in alerts:
-                        if w.lower() in t.lower():
-                            brands.append({
-                                "word":w,
-                                "text":t
-                            })
+                        if w.lower() in s["text"].lower():
 
-                processed += len(batch)
+                            dur=s["end"]-s["start"]
 
-                elapsed = time.time()-start
-                speed = processed/elapsed if elapsed>0 else 0
+                            talktime[w]=talktime.get(w,0)+dur
 
-                job["percent"] = min(99, processed*2)
-                job["eta"] = eta_format((60/speed) if speed>0 else 0)
-                job["step"] = "transcribing"
-                job["transcript"] = transcript
-                job["brands"] = brands
+                processed+=len(batch)
+
+                elapsed=time.time()-start
+                speed=processed/elapsed if elapsed>0 else 0
+
+                job["percent"]=min(99,processed*2)
+                job["eta"]=eta_format((60/speed) if speed>0 else 0)
+                job["step"]="transcribing"
 
                 batch=[]
 
@@ -179,16 +213,25 @@ def worker():
         job["step"]="completed"
         job["status"]="finished"
 
+        job["sponsor_talktime"]=talktime
+
+        summary=llm_summary(" ".join(transcript))
+
+        asyncio.run(push(job_id,{
+            "type":"summary",
+            "text":summary
+        }))
+
 threading.Thread(target=worker,daemon=True).start()
 
 @app.post("/api/start")
 def start(payload:dict):
 
-    url = payload.get("url")
-    alerts = payload.get("alerts","")
+    url=payload.get("url")
+    alerts=payload.get("alerts","")
 
     if not url:
-        raise HTTPException(400,"URL missing")
+        raise HTTPException(400,"url missing")
 
     words=[x.strip() for x in alerts.split(",") if x.strip()]
 
@@ -200,31 +243,36 @@ def start(payload:dict):
         "eta":"",
         "step":"queued",
         "status":"running",
-        "transcript":[],
-        "brands":[]
+        "sponsor_talktime":{}
     }
+
+    STREAMS[job_id]=asyncio.Queue()
 
     JOB_QUEUE.put((job_id,url,words))
 
     return {"job_id":job_id}
 
+@app.get("/api/events/{job_id}")
+async def events(job_id):
+
+    if job_id not in STREAMS:
+        raise HTTPException(404)
+
+    async def gen():
+        q=STREAMS[job_id]
+        while True:
+            data=await q.get()
+            yield f"data: {json.dumps(data)}\\n\\n"
+
+    return StreamingResponse(gen(),media_type="text/event-stream")
+
 @app.get("/api/status/{job_id}")
 def status(job_id):
+
     if job_id not in JOBS:
         raise HTTPException(404)
+
     return JOBS[job_id]
-
-@app.get("/api/transcript/{job_id}")
-def transcript(job_id):
-    if job_id not in JOBS:
-        raise HTTPException(404)
-    return JOBS[job_id]["transcript"]
-
-@app.get("/api/brands/{job_id}")
-def brands(job_id):
-    if job_id not in JOBS:
-        raise HTTPException(404)
-    return JOBS[job_id]["brands"]
 
 @app.get("/api/health")
 def health():

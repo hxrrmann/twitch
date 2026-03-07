@@ -4,3 +4,5 @@ uvicorn
 faster-whisper
 yt-dlp
 ffmpeg-python
+openai
+anthropic
