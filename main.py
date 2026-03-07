@@ -1,564 +1,1230 @@
 
-import os, re, json, uuid, time, queue, threading, subprocess, shutil, hashlib
+import os
+import re
+import io
+import json
+import math
+import time
+import uuid
+import wave
+import shutil
+import queue
+import audioop
+import threading
+import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, Request, HTTPException, Response
-from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-import whisper
-from yt_dlp import YoutubeDL
-import requests
+
+# ============================================================
+# Paths and app
+# ============================================================
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "data"
-DATA.mkdir(exist_ok=True)
+TEMPLATES_DIR = ROOT / "templates"
+STATIC_DIR = ROOT / "static"
+DATA_DIR = ROOT / "data"
+JOBS_DIR = DATA_DIR / "jobs"
+TMP_DIR = DATA_DIR / "tmp"
 
-SEGMENT_SECONDS = int(os.environ.get("SEGMENT_SECONDS", "20"))
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
-VOD_LANGUAGE = os.environ.get("VOD_LANGUAGE", "de")
-ETA_SPEED = float(os.environ.get("ETA_SPEED", "10"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-TWITCH_CLIENT_ID = os.environ.get("TWITCH_CLIENT_ID", "")
-TWITCH_OAUTH_TOKEN = os.environ.get("TWITCH_OAUTH_TOKEN", "")
+app = FastAPI(title="Stream Intel")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-app = FastAPI(title="Amar Stream AI Platform")
-templates = Jinja2Templates(directory=str(ROOT / "templates"))
-app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
-
-jobs: Dict[str, dict] = {}
-state_lock = threading.Lock()
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-def seconds_to_hms(seconds: float) -> str:
-    total = max(0, int(seconds))
-    h = total // 3600
-    m = (total % 3600) // 60
-    s = total % 60
-    return f"{h}h{m:02d}m{s:02d}s"
+# ============================================================
+# Config
+# ============================================================
+
+DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
+DEFAULT_COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8")
+DEFAULT_LANG = os.environ.get("WHISPER_LANG", "de")
+WORKERS = max(1, int(os.environ.get("WORKERS", "4")))
+SEGMENT_SECONDS = max(15, min(30, int(os.environ.get("SEGMENT_SECONDS", "20"))))
+VAD_FRAME_MS = 30
+VAD_WINDOW_MS = 400
+MIN_SPEECH_MS = 700
+MAX_SILENCE_MS = 650
+TRANSCRIPT_MIN_CHARS = 2
+STATUS_POLL_SECONDS = 1.0
+MAX_KEEP_JOBS = max(10, int(os.environ.get("MAX_KEEP_JOBS", "250")))
+DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "10800"))
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
 
-def fmt_hhmmss(seconds: float) -> str:
-    total = max(0, int(seconds))
-    h = total // 3600
-    m = (total % 3600) // 60
-    s = total % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
+# ============================================================
+# Model lazy load
+# ============================================================
+
+_MODEL = None
+_MODEL_LOCK = threading.Lock()
 
 
-def twitch_ts_link(url: str, seconds: float) -> str:
-    ts = seconds_to_hms(seconds)
-    joiner = "&" if "?" in url else "?"
-    return f"{url}{joiner}t={ts}"
+def get_model():
+    global _MODEL
+    with _MODEL_LOCK:
+        if _MODEL is None:
+            from faster_whisper import WhisperModel
+            _MODEL = WhisperModel(
+                DEFAULT_MODEL,
+                device="cpu",
+                compute_type=DEFAULT_COMPUTE,
+                cpu_threads=max(1, WORKERS),
+                num_workers=max(1, WORKERS),
+            )
+        return _MODEL
 
 
-def _safe_word_regex(q: str) -> re.Pattern:
-    return re.compile(rf"\b{re.escape(q)}\b", re.IGNORECASE)
+# ============================================================
+# Utilities
+# ============================================================
+
+def now_ts() -> float:
+    return time.time()
 
 
-def _job_key(url: str) -> str:
-    return hashlib.sha1(url.strip().encode("utf-8")).hexdigest()[:16]
+def safe_slug(value: str) -> str:
+    out = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip())
+    return out.strip("_") or "item"
 
 
-def _state_path(job_dir: Path) -> Path:
-    return job_dir / "state.json"
+def hms(seconds: Optional[int]) -> str:
+    if seconds is None:
+        return ""
+    s = max(0, int(seconds))
+    h = s // 3600
+    m = (s % 3600) // 60
+    r = s % 60
+    if h > 0:
+        return f"{h}:{m:02d}:{r:02d}"
+    return f"{m}:{r:02d}"
 
 
-def _transcript_path(job_dir: Path) -> Path:
-    return job_dir / "transcript.jsonl"
+def fmt_ts(seconds: float) -> str:
+    s = max(0, int(seconds))
+    h = s // 3600
+    m = (s % 3600) // 60
+    r = s % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{r:02d}"
+    return f"{m:02d}:{r:02d}"
 
 
-def _save_state(job: dict):
-    safe = {
-        "id": job["id"],
-        "key": job["key"],
-        "url": job["url"],
-        "mode": job["mode"],
-        "status": job["status"],
-        "watch": sorted(list(job.get("watch", set()))),
-        "pct": job.get("pct", 0),
-        "eta": job.get("eta"),
-        "last_status": job.get("last_status", ""),
-        "last_index": job.get("last_index", -1),
-        "duration_sec": job.get("duration_sec"),
-        "summary": job.get("summary", {}),
-        "sponsor_report": job.get("sponsor_report", {}),
-        "hidden_sponsor": job.get("hidden_sponsor", []),
-        "stats": job.get("stats", {"top_words": [], "heat": {}, "emotion_heat": {}}),
-        "created_at": job.get("created_at", time.time()),
-        "updated_at": time.time(),
-    }
-    _state_path(job["dir"]).write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+def twitch_timestamp_link(vod_url: str, seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    suffix = ""
+    if h > 0:
+        suffix += f"{h}h"
+    if m > 0 or h > 0:
+        suffix += f"{m}m"
+    suffix += f"{s}s"
+    join = "&" if "?" in vod_url else "?"
+    return f"{vod_url}{join}t={suffix}"
 
 
-def _load_segments(job_dir: Path) -> List[dict]:
-    p = _transcript_path(job_dir)
-    if not p.exists():
-        return []
-    out = []
-    with p.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                pass
-    return out
+def list_job_files() -> List[Path]:
+    files = [p for p in JOBS_DIR.glob("*.json") if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
 
 
-def _append_segment(job: dict, seg: dict):
-    with _transcript_path(job["dir"]).open("a", encoding="utf-8") as f:
-        f.write(json.dumps(seg, ensure_ascii=False) + "\n")
+def prune_old_jobs() -> None:
+    files = list_job_files()
+    for p in files[MAX_KEEP_JOBS:]:
+        try:
+            p.unlink()
+        except Exception:
+            pass
 
 
-def _load_or_create_job(url: str) -> dict:
-    key = _job_key(url)
-    job_dir = DATA / key
-    job_dir.mkdir(parents=True, exist_ok=True)
-    state_p = _state_path(job_dir)
-    if state_p.exists():
-        data = json.loads(state_p.read_text(encoding="utf-8"))
-        job = {
-            "id": data["id"],
-            "key": key,
-            "url": data["url"],
-            "mode": "vod",
-            "status": data.get("status", "idle"),
-            "dir": job_dir,
-            "segments": _load_segments(job_dir),
-            "watch": set(data.get("watch", [])),
-            "sse_q": queue.Queue(),
-            "stop": False,
-            "thread": None,
-            "pct": data.get("pct", 0),
-            "eta": data.get("eta"),
-            "last_status": data.get("last_status", "Bereit"),
-            "last_index": data.get("last_index", -1),
-            "duration_sec": data.get("duration_sec"),
-            "stats": data.get("stats", {"top_words": [], "heat": {}, "emotion_heat": {}}),
-            "summary": data.get("summary", {}),
-            "sponsor_report": data.get("sponsor_report", {}),
-            "hidden_sponsor": data.get("hidden_sponsor", []),
-            "created_at": data.get("created_at", time.time()),
-        }
-        jobs[job["id"]] = job
-        return job
-    job_id = uuid.uuid4().hex[:10]
-    job = {
+def job_path(job_id: str) -> Path:
+    return JOBS_DIR / f"{job_id}.json"
+
+
+def temp_job_dir(job_id: str) -> Path:
+    d = TMP_DIR / job_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def default_job(job_id: str, vod_url: str = "", brand_alerts: Optional[List[str]] = None) -> Dict[str, Any]:
+    return {
         "id": job_id,
-        "key": key,
-        "url": url.strip(),
-        "mode": "vod",
-        "status": "idle",
-        "dir": job_dir,
-        "segments": [],
-        "watch": set(),
-        "sse_q": queue.Queue(),
-        "stop": False,
-        "thread": None,
-        "pct": 0,
-        "eta": None,
-        "last_status": "Bereit",
-        "last_index": -1,
-        "duration_sec": None,
-        "stats": {"top_words": [], "heat": {}, "emotion_heat": {}},
-        "summary": {},
-        "sponsor_report": {},
-        "hidden_sponsor": [],
-        "created_at": time.time(),
+        "vod_url": vod_url,
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+        "eta_seconds": None,
+        "eta_hms": "",
+        "created_at": now_ts(),
+        "updated_at": now_ts(),
+        "paused": False,
+        "error": None,
+        "brand_alerts": brand_alerts or [],
+        "artifacts": {
+            "audio_wav": "",
+            "segments_json": "",
+            "job_dir": "",
+        },
+        "state": {
+            "download_done": False,
+            "speech_segments_done": False,
+            "transcription_done": False,
+            "analysis_done": False,
+            "report_done": False,
+        },
+        "metrics": {
+            "audio_seconds": 0,
+            "speech_seconds": 0,
+            "processed_segments": 0,
+            "total_segments": 0,
+            "mentions": 0,
+        },
+        "result": {
+            "transcript": "",
+            "segments": [],
+            "brand_mentions": [],
+            "hidden_context": [],
+            "stream_summary": "",
+            "timeline": [],
+            "sponsor_report": {},
+        },
     }
-    jobs[job_id] = job
-    _save_state(job)
+
+
+_JOB_LOCKS: Dict[str, threading.Lock] = {}
+_RUNNING_THREADS: Dict[str, threading.Thread] = {}
+
+
+def get_job_lock(job_id: str) -> threading.Lock:
+    if job_id not in _JOB_LOCKS:
+        _JOB_LOCKS[job_id] = threading.Lock()
+    return _JOB_LOCKS[job_id]
+
+
+def load_job(job_id: str) -> Dict[str, Any]:
+    p = job_path(job_id)
+    if not p.exists():
+        raise KeyError(job_id)
+    return read_json(p)
+
+
+def save_job(job: Dict[str, Any]) -> None:
+    job["updated_at"] = now_ts()
+    job["eta_hms"] = hms(job.get("eta_seconds"))
+    atomic_write_json(job_path(job["id"]), job)
+
+
+def update_job(job_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    with get_job_lock(job_id):
+        job = load_job(job_id)
+        deep_update(job, patch)
+        save_job(job)
+        return job
+
+
+def deep_update(target: Dict[str, Any], patch: Dict[str, Any]) -> None:
+    for k, v in patch.items():
+        if isinstance(v, dict) and isinstance(target.get(k), dict):
+            deep_update(target[k], v)
+        else:
+            target[k] = v
+
+
+def create_job(vod_url: str, brand_alerts: Optional[List[str]] = None) -> Dict[str, Any]:
+    job_id = uuid.uuid4().hex
+    job = default_job(job_id, vod_url=vod_url, brand_alerts=brand_alerts or [])
+    d = temp_job_dir(job_id)
+    job["artifacts"]["job_dir"] = str(d)
+    save_job(job)
+    prune_old_jobs()
     return job
 
 
-def job_emit(job_id: str, item: dict):
-    job = jobs.get(job_id)
-    if job:
-        job["sse_q"].put(item)
-
-
-def set_progress(job: dict, status: str, pct: Optional[float] = None, eta: Optional[float] = None):
-    job["last_status"] = status
-    if pct is not None:
-        job["pct"] = max(0, min(100, round(float(pct), 1)))
-    if eta is not None:
-        job["eta"] = None if eta is None else max(0, int(eta))
-    _save_state(job)
-    job_emit(job["id"], {"type": "status", "status": status, "pct": job.get("pct", 0), "eta": job.get("eta")})
-
-
-def download_vod_audio(url: str, out_dir: Path):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    uid = uuid.uuid4().hex
-    tmpl = str(out_dir / f"{uid}_%(id)s.%(ext)s")
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": tmpl,
-        "quiet": True,
-        "noplaylist": True,
-    }
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = Path(ydl.prepare_filename(info))
-        duration = info.get("duration")
+def latest_matching_job(vod_url: str) -> Optional[Dict[str, Any]]:
+    for p in list_job_files():
         try:
-            duration = float(duration) if duration is not None else None
+            job = read_json(p)
         except Exception:
-            duration = None
-        return path, duration
-
-
-def transcribe_file(model, path: Path, language: str = "") -> List[dict]:
-    kwargs = {"verbose": False, "word_timestamps": False, "condition_on_previous_text": False}
-    if language:
-        kwargs["language"] = language
-    result = model.transcribe(str(path), **kwargs)
-    segs = []
-    for s in result.get("segments", []):
-        text = (s.get("text") or "").strip()
-        if not text:
             continue
-        segs.append({
-            "start": float(s["start"]),
-            "end": float(s["end"]),
-            "text": text,
-        })
-    return segs
+        if job.get("vod_url") == vod_url and job.get("status") in {"running", "paused", "queued"}:
+            return job
+    return None
 
 
-def clean_text(text: str) -> str:
-    t = re.sub(r"\s+", " ", (text or "")).strip()
-    t = re.sub(r"(^|\s)([a-zA-ZäöüÄÖÜß])(?=\s|$)", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    if len(t) < 3:
-        return ""
-    if not re.search(r"[a-zA-ZäöüÄÖÜß]", t):
-        return ""
-    if t and t[-1] not in ".!?":
-        t += "."
-    return t
-
-
-def merge_segments(segs: List[dict]) -> List[dict]:
-    if not segs:
-        return []
-    out = []
-    cur = {"start": segs[0]["start"], "end": segs[0]["end"], "text": segs[0]["text"]}
-    for s in segs[1:]:
-        gap = float(s["start"] - cur["end"])
-        cur_text = cur["text"]
-        nxt_text = s["text"]
-        if gap <= 1.4 and len(cur_text) < 220:
-            cur["end"] = s["end"]
-            cur["text"] = (cur_text.rstrip(".?!") + " " + nxt_text).strip()
-        else:
-            cur["text"] = clean_text(cur["text"])
-            if cur["text"]:
-                out.append(cur)
-            cur = {"start": s["start"], "end": s["end"], "text": s["text"]}
-    cur["text"] = clean_text(cur["text"])
-    if cur["text"]:
-        out.append(cur)
-    return out
-
-
-def toxicity_score(text: str) -> float:
-    bad = ["idiot", "trash", "scheiße", "noob", "stfu"]
-    t = text.lower()
-    return min(1.0, sum(1 for x in bad if x in t) / 2.0)
-
-
-def emotion_label(text: str) -> str:
-    t = text.lower()
-    if any(x in t for x in ["lets go", "let's go", "gg", "insane", "krank"]) or "!" in text:
-        return "Hype"
-    if any(x in t for x in ["fuck", "scheiße", "bro", "unfair"]):
-        return "Rage"
-    if any(x in t for x in ["haha", "lol", "lmao"]):
-        return "Funny"
-    return "Neutral"
-
-
-def rebuild_word_stats(job: dict):
-    freq: Dict[str, int] = {}
-    heat: Dict[int, int] = {}
-    emo_heat = {}
-    for s in job["segments"]:
-        minute = int(float(s["start"]) // 60)
-        heat[minute] = heat.get(minute, 0) + 1
-        emo = emotion_label(s["text"])
-        emo_heat.setdefault(minute, {"Hype": 0, "Rage": 0, "Funny": 0, "Neutral": 0})
-        emo_heat[minute][emo] += 1
-        for w in re.findall(r"[\w']{3,}", s["text"].lower()):
-            if w.isdigit():
-                continue
-            freq[w] = freq.get(w, 0) + 1
-    job["stats"] = {"top_words": sorted(freq.items(), key=lambda kv: kv[1], reverse=True)[:50], "heat": heat, "emotion_heat": emo_heat}
-
-
-def compute_sponsor_report(job: dict):
-    brands = sorted(list(job["watch"]))
-    report = {}
-    cta_terms = ["code", "rabatt", "link", "beschreibung", "partner", "sponsor"]
-    for b in brands:
-        pat = _safe_word_regex(b)
-        hits = []
-        talktime = 0.0
-        for s in job["segments"]:
-            txt = s["text"]
-            lower = txt.lower()
-            if pat.search(txt) or any(term in lower for term in cta_terms if b.lower() in lower or any(term in lower for term in cta_terms)):
-                dur = max(0.0, float(s["end"] - s["start"]))
-                talktime += min(dur, 20.0)
-                hits.append({
-                    "start": s["start"],
-                    "time": seconds_to_hms(s["start"]),
-                    "text": txt,
-                    "link": twitch_ts_link(job["url"], s["start"]),
-                })
-        if hits:
-            report[b] = {"mentions": len(hits), "total_talktime_sec": round(talktime, 1), "hits": hits}
-    job["sponsor_report"] = report
-
-
-def compute_hidden_sponsor(job: dict):
-    contexts = {
-        "crypto": ["krypto", "börse", "trading", "wallet", "bitcoin", "btc", "eth", "ethereum", "altcoin"],
-        "nutrition": ["protein", "creatin", "kreatin", "shake", "kalorien", "supplement"],
-        "hardware": ["maus", "keyboard", "tastatur", "headset", "logitech", "razer", "steelseries", "gpu", "grafikkarte"],
-        "banking": ["karte", "broker", "bank", "konto", "zahlung"],
-    }
-    found = []
-    for s in job["segments"]:
-        t = s["text"].lower()
-        for k, words in contexts.items():
-            if any(w in t for w in words):
-                found.append({
-                    "context": k,
-                    "start": s["start"],
-                    "time": seconds_to_hms(s["start"]),
-                    "text": s["text"],
-                    "link": twitch_ts_link(job["url"], s["start"]),
-                })
-    out = []
-    for it in sorted(found, key=lambda x: x["start"]):
-        if out and it["context"] == out[-1]["context"] and abs(it["start"] - out[-1]["start"]) < 30:
-            continue
-        out.append(it)
-    job["hidden_sponsor"] = out[:200]
-
-
-def stream_summary(job: dict):
-    top = job.get("stats", {}).get("top_words", [])[:12]
-    summary = {
-        "segments": len(job["segments"]),
-        "top_words": [{"word": w, "count": c} for w, c in top],
-        "sponsor_brands": list(job.get("sponsor_report", {}).keys()),
-        "current_status": job.get("last_status", ""),
-    }
-    job["summary"] = summary
-
-
-def _apply_segment(job: dict, seg: dict):
-    job["segments"].append(seg)
-    _append_segment(job, seg)
-    for w in list(job["watch"]):
-        if _safe_word_regex(w).search(seg["text"]):
-            job_emit(job["id"], {"type": "alert", "word": w, "time": seconds_to_hms(seg["start"]), "start": seg["start"], "text": seg["text"], "link": twitch_ts_link(job["url"], seg["start"])})
-
-
-def run_vod_job(job_id: str):
-    job = jobs[job_id]
-    try:
-        job["stop"] = False
-        job["status"] = "downloading"
-        set_progress(job, "Downloading VOD", 2, None)
-        audio_path, duration = download_vod_audio(job["url"], job["dir"] / "media")
-        if duration:
-            job["duration_sec"] = duration
-            est = int(max(20, duration / ETA_SPEED))
-        else:
-            est = None
-        set_progress(job, "Preparing audio", 10, est)
-        model = whisper.load_model(WHISPER_MODEL)
-        set_progress(job, "Transcribing", 15, est)
-        raw = transcribe_file(model, audio_path, language=VOD_LANGUAGE)
-        merged = merge_segments(raw)
-        total = max(1, len(merged))
-        start_index = int(job.get("last_index", -1)) + 1
-        if start_index < 0:
-            start_index = 0
-        for idx, seg in enumerate(merged):
-            if idx < start_index:
-                continue
-            if job.get("stop"):
-                job["status"] = "paused"
-                set_progress(job, "Paused", job.get("pct", 0), job.get("eta"))
-                return
-            _apply_segment(job, seg)
-            job_emit(job_id, {"type": "segment", "segment": seg})
-            job["last_index"] = idx
-            pct = 15 + (idx + 1) / total * 70
-            remaining = total - (idx + 1)
-            eta = int(remaining * 2) if remaining > 0 else 0
-            set_progress(job, "Transcribing", pct, eta)
-        set_progress(job, "Analysing", 90, 10)
-        rebuild_word_stats(job)
-        compute_sponsor_report(job)
-        compute_hidden_sponsor(job)
-        stream_summary(job)
-        job_emit(job_id, {"type": "stats", "stats": job["stats"]})
-        job_emit(job_id, {"type": "sponsors", "report": job["sponsor_report"]})
-        job_emit(job_id, {"type": "hidden_sponsor", "items": job["hidden_sponsor"]})
-        job_emit(job_id, {"type": "summary", "summary": job["summary"]})
-        job["status"] = "done"
-        set_progress(job, "Finished", 100, 0)
-    except Exception as e:
-        job["status"] = "error"
-        _save_state(job)
-        job_emit(job_id, {"type": "error", "message": f"{e}"})
-
-
-def start_or_resume_job(job: dict):
-    if job.get("thread") and job["thread"].is_alive():
-        return
-    t = threading.Thread(target=run_vod_job, args=(job["id"],), daemon=True)
-    job["thread"] = t
-    t.start()
-
+# ============================================================
+# Routes
+# ============================================================
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+async def index(request: Request):
+    if not TEMPLATES_DIR.exists():
+        return HTMLResponse("<h1>templates directory not found</h1>", status_code=500)
+    if (TEMPLATES_DIR / "index.html").exists():
+        return templates.TemplateResponse("index.html", {"request": request})
+    return HTMLResponse("<h1>index.html not found</h1>", status_code=500)
 
 
-@app.post("/api/start")
-async def api_start(payload: dict, response: Response):
-    url = (payload.get("url") or "").strip()
-    watch = payload.get("watch") or []
-    if not url:
-        raise HTTPException(400, "Missing url")
-    job = _load_or_create_job(url)
-    if isinstance(watch, list):
-        job["watch"] = set([w.strip() for w in watch if isinstance(w, str) and w.strip()])
-    start_or_resume_job(job)
-    response.set_cookie("job_id", job["id"], httponly=False, samesite="lax")
-    _save_state(job)
-    return {"job_id": job["id"]}
+@app.get("/health")
+async def health():
+    return {"ok": True, "workers": WORKERS, "segment_seconds": SEGMENT_SECONDS}
 
 
-@app.post("/api/stop/{job_id}")
-async def api_stop(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    job["stop"] = True
-    job["status"] = "pausing"
-    _save_state(job)
-    return {"ok": True}
+@app.post("/api/job")
+async def api_create_job(payload: Dict[str, Any]):
+    vod_url = (payload or {}).get("vod_url", "").strip()
+    if not vod_url:
+        raise HTTPException(status_code=400, detail="vod_url fehlt")
+    brand_alerts = normalize_brand_alerts((payload or {}).get("brand_alerts"))
+
+    existing = latest_matching_job(vod_url)
+    if existing:
+        if brand_alerts:
+            existing["brand_alerts"] = dedupe_strings(existing.get("brand_alerts", []) + brand_alerts)
+            save_job(existing)
+        ensure_runner(existing["id"])
+        return {
+            "job_id": existing["id"],
+            "resumed": True,
+            "status": existing.get("status"),
+        }
+
+    job = create_job(vod_url, brand_alerts=brand_alerts)
+    ensure_runner(job["id"])
+    return {"job_id": job["id"], "resumed": False, "status": job["status"]}
 
 
-@app.post("/api/watch/{job_id}")
-async def api_watch(job_id: str, payload: dict):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    words = payload.get("words") or []
-    if not isinstance(words, list):
-        raise HTTPException(400, "words must be list")
-    job["watch"] = set([w.strip() for w in words if isinstance(w, str) and w.strip()])
-    compute_sponsor_report(job)
-    _save_state(job)
-    job_emit(job_id, {"type": "sponsors", "report": job["sponsor_report"]})
-    return {"ok": True}
+@app.get("/api/job/{job_id}")
+async def api_get_job(job_id: str):
+    try:
+        job = load_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+    return job
 
 
-@app.get("/api/search/{job_id}")
-async def api_search(job_id: str, q: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    q = (q or "").strip()
-    if not q:
-        return {"results": []}
-    pat = _safe_word_regex(q)
-    out = []
-    for s in job["segments"]:
-        if pat.search(s["text"]):
-            out.append({"start": s["start"], "time": seconds_to_hms(s["start"]), "text": s["text"], "link": twitch_ts_link(job["url"], s["start"])})
-    return {"results": out[:800]}
+@app.post("/api/job/{job_id}/pause")
+async def api_pause_job(job_id: str):
+    try:
+        job = update_job(job_id, {"paused": True, "status": "paused"})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+    return {"ok": True, "job_id": job_id, "status": job["status"]}
 
 
-@app.get("/api/status/{job_id}")
-async def api_status(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    return {"status": job.get("last_status"), "pct": job.get("pct"), "eta": job.get("eta")}
+@app.post("/api/job/{job_id}/resume")
+async def api_resume_job(job_id: str):
+    try:
+        job = update_job(job_id, {"paused": False, "status": "queued"})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+    ensure_runner(job_id)
+    return {"ok": True, "job_id": job_id, "status": job["status"]}
 
 
-@app.get("/api/events/{job_id}")
-async def api_events(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    def gen():
-        yield f"data: {json.dumps({'type':'status','status':job.get('last_status'),'pct':job.get('pct',0),'eta':job.get('eta')})}\n\n"
-        # replay state on reconnect
-        if job.get("stats"):
-            yield f"data: {json.dumps({'type':'stats','stats':job['stats']})}\n\n"
-        if job.get("sponsor_report"):
-            yield f"data: {json.dumps({'type':'sponsors','report':job['sponsor_report']})}\n\n"
-        if job.get("hidden_sponsor"):
-            yield f"data: {json.dumps({'type':'hidden_sponsor','items':job['hidden_sponsor']})}\n\n"
-        if job.get("summary"):
-            yield f"data: {json.dumps({'type':'summary','summary':job['summary']})}\n\n"
-        q = job["sse_q"]
+@app.get("/api/job_stream/{job_id}")
+async def api_job_stream(job_id: str):
+    try:
+        load_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+
+    async def gen():
+        last = None
         while True:
             try:
-                item = q.get(timeout=15)
-                yield f"data: {json.dumps(item)}\n\n"
-            except queue.Empty:
-                yield "data: {"type":"keepalive"}\n\n"
+                job = load_job(job_id)
+            except KeyError:
+                break
+            cur = json.dumps(job, ensure_ascii=False)
+            if cur != last:
+                last = cur
+                yield f"data: {cur}\n\n"
+            if job.get("status") in {"done", "error"}:
+                break
+            import asyncio
+            await asyncio.sleep(STATUS_POLL_SECONDS)
+
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-@app.get("/download/{job_id}/{filename}")
-async def download(job_id: str, filename: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    p = job["dir"] / "exports" / filename
-    if not p.exists():
-        raise HTTPException(404, "file not found")
-    return FileResponse(str(p), filename=filename)
+@app.post("/api/brand_alerts")
+async def api_brand_alerts(payload: Dict[str, Any]):
+    job_id = (payload or {}).get("job_id", "").strip()
+    brands = normalize_brand_alerts((payload or {}).get("brands"))
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id fehlt")
+    try:
+        job = load_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+
+    merged = dedupe_strings(job.get("brand_alerts", []) + brands)
+    job["brand_alerts"] = merged
+    recompute_mentions(job)
+    save_job(job)
+    return {"ok": True, "brands": merged, "mentions": len(job["result"].get("brand_mentions", []))}
 
 
-@app.post("/start")
-async def start_compat(payload: dict, response: Response):
-    return await api_start(payload, response)
+@app.get("/api/sponsor_report/{job_id}")
+async def api_sponsor_report(job_id: str):
+    try:
+        job = load_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+    return JSONResponse(job["result"].get("sponsor_report", {}))
 
 
-@app.get("/search")
-async def search_compat(request: Request, q: str = ""):
-    job_id = request.cookies.get("job_id") or ""
-    if not job_id or job_id not in jobs:
-        raise HTTPException(404, "job not found")
-    return await api_search(job_id, q=q)
+@app.get("/api/sponsor_report_pdf/{job_id}")
+async def api_sponsor_report_pdf(job_id: str):
+    try:
+        job = load_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+
+    report = job["result"].get("sponsor_report") or {}
+    if not report:
+        raise HTTPException(status_code=400, detail="kein sponsor report vorhanden")
+
+    pdf = build_pdf_bytes(report, job)
+    headers = {
+        "Content-Disposition": f'attachment; filename="sponsor_report_{job_id}.pdf"'
+    }
+    return Response(content=pdf, media_type="application/pdf", headers=headers)
 
 
-@app.post("/alerts")
-async def alerts_compat(request: Request, payload: dict):
-    job_id = request.cookies.get("job_id") or ""
-    if not job_id or job_id not in jobs:
-        raise HTTPException(404, "job not found")
-    words = payload.get("words")
-    if words is None:
-        raw = payload.get("alerts") or payload.get("watch") or ""
-        words = [w.strip() for w in str(raw).split(",") if w.strip()]
-    return await api_watch(job_id, {"words": words})
+@app.get("/api/stream_summary/{job_id}")
+async def api_stream_summary(job_id: str):
+    try:
+        job = load_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+    return {"summary": job["result"].get("stream_summary", "")}
+
+
+@app.get("/api/hidden_context/{job_id}")
+async def api_hidden_context(job_id: str):
+    try:
+        job = load_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+    return {"items": job["result"].get("hidden_context", [])}
+
+
+@app.get("/api/brand_mentions/{job_id}")
+async def api_brand_mentions(job_id: str):
+    try:
+        job = load_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job nicht gefunden")
+    return {"mentions": job["result"].get("brand_mentions", [])}
+
+
+# Backward compatible aliases that many frontends use
+@app.post("/api/start")
+async def api_start_alias(payload: Dict[str, Any]):
+    return await api_create_job(payload)
+
+
+@app.post("/api/stop")
+async def api_stop_alias(payload: Dict[str, Any]):
+    job_id = (payload or {}).get("job_id", "").strip()
+    return await api_pause_job(job_id)
+
+
+@app.post("/api/resume")
+async def api_resume_alias(payload: Dict[str, Any]):
+    job_id = (payload or {}).get("job_id", "").strip()
+    return await api_resume_job(job_id)
+
+
+# ============================================================
+# Normalization
+# ============================================================
+
+def normalize_brand_alerts(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[,;\n]+", value)
+    elif isinstance(value, list):
+        parts = [str(x) for x in value]
+    else:
+        parts = [str(value)]
+    clean = []
+    for part in parts:
+        p = part.strip()
+        if p:
+            clean.append(p)
+    return dedupe_strings(clean)
+
+
+def dedupe_strings(items: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for item in items:
+        key = item.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(item.strip())
+    return out
+
+
+# ============================================================
+# Pipeline entry
+# ============================================================
+
+def ensure_runner(job_id: str) -> None:
+    existing = _RUNNING_THREADS.get(job_id)
+    if existing and existing.is_alive():
+        return
+    thread = threading.Thread(target=run_job_safe, args=(job_id,), daemon=True)
+    _RUNNING_THREADS[job_id] = thread
+    thread.start()
+
+
+def run_job_safe(job_id: str) -> None:
+    try:
+        run_job(job_id)
+    except Exception as exc:
+        try:
+            update_job(job_id, {
+                "status": "error",
+                "stage": "error",
+                "error": str(exc),
+                "eta_seconds": 0,
+            })
+        except Exception:
+            pass
+
+
+def wait_if_paused(job_id: str) -> None:
+    while True:
+        job = load_job(job_id)
+        if not job.get("paused"):
+            return
+        time.sleep(0.8)
+
+
+def run_job(job_id: str) -> None:
+    job = load_job(job_id)
+    vod_url = job.get("vod_url", "")
+    jdir = Path(job["artifacts"]["job_dir"])
+    jdir.mkdir(parents=True, exist_ok=True)
+
+    # 1 download and wav
+    if not job["state"].get("download_done"):
+        update_job(job_id, {
+            "status": "running",
+            "stage": "download",
+            "progress": 2,
+            "eta_seconds": None,
+            "error": None,
+        })
+        wait_if_paused(job_id)
+        audio_path = download_and_prepare_audio(vod_url, jdir)
+        duration = wav_duration_seconds(audio_path)
+        update_job(job_id, {
+            "artifacts": {"audio_wav": str(audio_path)},
+            "metrics": {"audio_seconds": int(duration)},
+            "state": {"download_done": True},
+            "progress": 12,
+            "stage": "audio_ready",
+            "eta_seconds": estimate_eta_from_audio(duration, phase="speech"),
+        })
+    else:
+        audio_path = Path(load_job(job_id)["artifacts"]["audio_wav"])
+
+    # 2 speech detection
+    job = load_job(job_id)
+    speech_json = jdir / "speech_segments.json"
+    if not job["state"].get("speech_segments_done"):
+        update_job(job_id, {
+            "status": "running",
+            "stage": "speech_detection",
+            "progress": 18,
+            "eta_seconds": estimate_eta_from_audio(job["metrics"].get("audio_seconds", 0), phase="speech"),
+        })
+        wait_if_paused(job_id)
+        speech_segments = detect_speech_segments(audio_path)
+        atomic_write_json(speech_json, {"segments": speech_segments})
+        speech_seconds = int(sum(max(0.0, b - a) for a, b in speech_segments))
+        update_job(job_id, {
+            "state": {"speech_segments_done": True},
+            "metrics": {
+                "speech_seconds": speech_seconds,
+                "total_segments": len(speech_segments),
+            },
+            "progress": 30,
+            "stage": "speech_ready",
+            "eta_seconds": estimate_eta_from_audio(speech_seconds, phase="transcribe"),
+        })
+    else:
+        speech_segments = read_json(speech_json)["segments"]
+
+    # 3 transcription with resume
+    job = load_job(job_id)
+    segments_json = Path(job["artifacts"].get("segments_json") or (jdir / "segments.json"))
+    if not segments_json.exists():
+        atomic_write_json(segments_json, {"segments": [], "done_indexes": []})
+
+    if not job["state"].get("transcription_done"):
+        update_job(job_id, {
+            "status": "running",
+            "stage": "transcribing",
+            "progress": max(job.get("progress", 30), 32),
+            "artifacts": {"segments_json": str(segments_json)},
+            "eta_seconds": estimate_eta_from_audio(job["metrics"].get("speech_seconds", 0), phase="transcribe"),
+        })
+        transcribe_with_resume(job_id, audio_path, speech_segments, segments_json)
+
+    # 4 analysis
+    job = load_job(job_id)
+    if not job["state"].get("analysis_done"):
+        update_job(job_id, {
+            "status": "running",
+            "stage": "analysis",
+            "progress": 85,
+            "eta_seconds": 40,
+        })
+        wait_if_paused(job_id)
+        build_analysis(job_id, vod_url, segments_json)
+
+    # 5 report done
+    update_job(job_id, {
+        "state": {"report_done": True},
+        "stage": "done",
+        "status": "done",
+        "progress": 100,
+        "eta_seconds": 0,
+    })
+
+
+# ============================================================
+# Audio prep
+# ============================================================
+
+def run_cmd(cmd: List[str], timeout: Optional[int] = None) -> None:
+    subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=timeout,
+    )
+
+
+def download_and_prepare_audio(vod_url: str, jdir: Path) -> Path:
+    source = jdir / "source.%(ext)s"
+    wav = jdir / "audio.wav"
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "outtmpl": str(source),
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": 5,
+        "continuedl": True,
+        "overwrites": True,
+    }
+
+    from yt_dlp import YoutubeDL
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download([vod_url])
+
+    # find downloaded source
+    media_files = [p for p in jdir.iterdir() if p.is_file() and p.name != "audio.wav" and not p.name.endswith(".json")]
+    if not media_files:
+        raise RuntimeError("audio download fehlgeschlagen")
+    src = max(media_files, key=lambda p: p.stat().st_size)
+
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i", str(src),
+        "-ac", "1",
+        "-ar", "16000",
+        "-vn",
+        str(wav),
+    ]
+    run_cmd(cmd, timeout=DOWNLOAD_TIMEOUT)
+    if not wav.exists():
+        raise RuntimeError("wav erzeugung fehlgeschlagen")
+    return wav
+
+
+def wav_duration_seconds(path: Path) -> float:
+    with wave.open(str(path), "rb") as wf:
+        frames = wf.getnframes()
+        rate = wf.getframerate()
+        return 0.0 if rate <= 0 else frames / float(rate)
+
+
+# ============================================================
+# Simple speech detection
+# ============================================================
+
+def read_wave(path: Path) -> Tuple[bytes, int]:
+    with wave.open(str(path), "rb") as wf:
+        if wf.getnchannels() != 1:
+            raise RuntimeError("wav muss mono sein")
+        if wf.getsampwidth() != 2:
+            raise RuntimeError("wav muss 16 bit sein")
+        sr = wf.getframerate()
+        pcm = wf.readframes(wf.getnframes())
+        return pcm, sr
+
+
+def frame_bytes(sr: int, frame_ms: int) -> int:
+    return int(sr * frame_ms / 1000) * 2
+
+
+def detect_speech_segments(path: Path) -> List[Tuple[float, float]]:
+    pcm, sr = read_wave(path)
+    fb = frame_bytes(sr, VAD_FRAME_MS)
+    if fb <= 0:
+        return []
+
+    total_frames = len(pcm) // fb
+    if total_frames <= 0:
+        return []
+
+    energies = []
+    for i in range(total_frames):
+        chunk = pcm[i * fb:(i + 1) * fb]
+        rms = audioop.rms(chunk, 2)
+        energies.append(rms)
+
+    if not energies:
+        return []
+
+    sorted_e = sorted(energies)
+    noise_floor = sorted_e[max(0, int(len(sorted_e) * 0.20) - 1)]
+    threshold = max(250, int(noise_floor * 2.2))
+
+    frame_sec = VAD_FRAME_MS / 1000.0
+    min_speech = MIN_SPEECH_MS / 1000.0
+    max_silence = MAX_SILENCE_MS / 1000.0
+
+    segments: List[Tuple[float, float]] = []
+    in_speech = False
+    start = 0.0
+    silence_run = 0.0
+
+    for idx, rms in enumerate(energies):
+        t0 = idx * frame_sec
+        is_speech = rms >= threshold
+
+        if is_speech and not in_speech:
+            in_speech = True
+            start = t0
+            silence_run = 0.0
+        elif in_speech:
+            if is_speech:
+                silence_run = 0.0
+            else:
+                silence_run += frame_sec
+                if silence_run >= max_silence:
+                    end = max(start, t0 - silence_run + frame_sec)
+                    if end - start >= min_speech:
+                        segments.append((round(start, 3), round(end, 3)))
+                    in_speech = False
+                    silence_run = 0.0
+
+    if in_speech:
+        end = total_frames * frame_sec
+        if end - start >= min_speech:
+            segments.append((round(start, 3), round(end, 3)))
+
+    # merge close gaps
+    merged: List[Tuple[float, float]] = []
+    for s, e in segments:
+        if not merged:
+            merged.append((s, e))
+            continue
+        ps, pe = merged[-1]
+        if s - pe <= 0.45:
+            merged[-1] = (ps, e)
+        else:
+            merged.append((s, e))
+
+    # split very long ranges to target size
+    final: List[Tuple[float, float]] = []
+    for s, e in merged:
+        length = e - s
+        if length <= SEGMENT_SECONDS:
+            final.append((s, e))
+            continue
+        cur = s
+        while cur < e:
+            nxt = min(e, cur + SEGMENT_SECONDS)
+            final.append((round(cur, 3), round(nxt, 3)))
+            cur = nxt
+    return final
+
+
+# ============================================================
+# Transcription
+# ============================================================
+
+def estimate_eta_from_audio(seconds: int, phase: str) -> int:
+    seconds = int(seconds or 0)
+    if phase == "speech":
+        return max(10, int(seconds / 120) + 8)
+    if phase == "transcribe":
+        # small int8 on cpu best effort
+        return max(15, int(seconds / max(1, WORKERS * 6)) + 20)
+    return max(5, int(seconds / 10))
+
+
+def extract_clip_to_wav(full_wav: Path, out_path: Path, start: float, end: float) -> None:
+    dur = max(0.1, end - start)
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i", str(full_wav),
+        "-ss", f"{start:.3f}",
+        "-t", f"{dur:.3f}",
+        "-ac", "1",
+        "-ar", "16000",
+        str(out_path),
+    ]
+    run_cmd(cmd, timeout=max(30, int(dur * 3 + 30)))
+
+
+def normalize_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    text = text.replace(" ,", ",").replace(" .", ".").replace(" !", "!").replace(" ?", "?")
+    text = re.sub(r"([a-zA-ZäöüÄÖÜß0-9])\s+([,.!?])", r"\1\2", text)
+    return text.strip()
+
+
+def likely_fragment(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return True
+    words = t.split()
+    if len(t) < TRANSCRIPT_MIN_CHARS:
+        return True
+    if len(words) == 1:
+        w = words[0].lower()
+        if re.fullmatch(r"\d+", w):
+            return True
+        if len(w) <= 2:
+            return True
+    return False
+
+
+def punctuate_merge(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not lines:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    cur = dict(lines[0])
+
+    for item in lines[1:]:
+        gap = float(item["start"]) - float(cur["end"])
+        joinable = gap <= 1.4 and len(cur["text"]) < 260
+        if joinable:
+            merged_text = normalize_text((cur["text"] + " " + item["text"]).strip())
+            cur["text"] = merged_text
+            cur["end"] = item["end"]
+            cur["link"] = item["link"]
+        else:
+            cur["text"] = finalize_sentence(cur["text"])
+            out.append(cur)
+            cur = dict(item)
+
+    cur["text"] = finalize_sentence(cur["text"])
+    out.append(cur)
+    return [x for x in out if not likely_fragment(x["text"])]
+
+
+def finalize_sentence(text: str) -> str:
+    t = normalize_text(text)
+    if not t:
+        return ""
+    if t[-1] not in ".!?":
+        t += "."
+    return t[0].upper() + t[1:] if len(t) > 1 else t.upper()
+
+
+def transcribe_single_clip(clip_path: Path) -> str:
+    model = get_model()
+    seg_iter, _info = model.transcribe(
+        str(clip_path),
+        language=DEFAULT_LANG,
+        beam_size=1,
+        best_of=1,
+        condition_on_previous_text=False,
+        vad_filter=True,
+        word_timestamps=False,
+    )
+    parts = []
+    for seg in seg_iter:
+        txt = normalize_text(seg.text)
+        if txt:
+            parts.append(txt)
+    text = normalize_text(" ".join(parts))
+    return text
+
+
+def transcribe_with_resume(job_id: str, full_wav: Path, speech_segments: List[Tuple[float, float]], segments_json: Path) -> None:
+    store = read_json(segments_json)
+    existing_segments = store.get("segments", [])
+    done_indexes = set(store.get("done_indexes", []))
+
+    total = len(speech_segments)
+    if total == 0:
+        update_job(job_id, {
+            "state": {"transcription_done": True},
+            "metrics": {"processed_segments": 0, "total_segments": 0},
+            "progress": 80,
+            "stage": "transcribing_done",
+            "eta_seconds": 8,
+            "result": {"segments": [], "transcript": ""},
+        })
+        return
+
+    pending = [(idx, rng) for idx, rng in enumerate(speech_segments) if idx not in done_indexes]
+    clips_dir = temp_job_dir(job_id) / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    q: "queue.Queue[Tuple[int, Tuple[float, float]]]" = queue.Queue()
+    for item in pending:
+        q.put(item)
+
+    results_lock = threading.Lock()
+    stop_flag = {"stop": False}
+
+    def worker():
+        while True:
+            try:
+                idx, (start, end) = q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                while load_job(job_id).get("paused"):
+                    time.sleep(0.8)
+                clip = clips_dir / f"seg_{idx:06d}.wav"
+                if not clip.exists():
+                    extract_clip_to_wav(full_wav, clip, float(start), float(end))
+                text = transcribe_single_clip(clip)
+                # drop hallucinated tiny fragments
+                if likely_fragment(text):
+                    text = ""
+                item = {
+                    "index": idx,
+                    "start": float(start),
+                    "end": float(end),
+                    "text": text,
+                    "link": twitch_timestamp_link(load_job(job_id).get("vod_url", ""), float(start)),
+                }
+                with results_lock:
+                    existing_segments.append(item)
+                    done_indexes.add(idx)
+                    atomic_write_json(segments_json, {
+                        "segments": existing_segments,
+                        "done_indexes": sorted(done_indexes),
+                    })
+                    processed = len(done_indexes)
+                    pct = 30 + int((processed / max(1, total)) * 50)
+                    remaining = max(0, total - processed)
+                    eta = max(5, int(remaining * 6 / max(1, WORKERS)))
+                    update_job(job_id, {
+                        "metrics": {
+                            "processed_segments": processed,
+                            "total_segments": total,
+                        },
+                        "progress": min(80, pct),
+                        "eta_seconds": eta,
+                        "stage": "transcribing",
+                    })
+            finally:
+                q.task_done()
+
+    threads = []
+    for _ in range(max(1, WORKERS)):
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
+
+    clean_segments = [s for s in existing_segments if normalize_text(s.get("text", ""))]
+    clean_segments.sort(key=lambda x: x["start"])
+    merged = punctuate_merge(clean_segments)
+    transcript = "\n".join([item["text"] for item in merged])
+
+    atomic_write_json(segments_json, {
+        "segments": merged,
+        "done_indexes": list(range(total)),
+    })
+    update_job(job_id, {
+        "state": {"transcription_done": True},
+        "metrics": {
+            "processed_segments": total,
+            "total_segments": total,
+        },
+        "progress": 80,
+        "stage": "transcribing_done",
+        "eta_seconds": 12,
+        "result": {
+            "segments": merged,
+            "transcript": transcript,
+        },
+        "artifacts": {"segments_json": str(segments_json)},
+    })
+
+
+# ============================================================
+# Analysis
+# ============================================================
+
+SPONSOR_PATTERNS = [
+    "sponsor", "gesponsert", "partner", "partnerschaft", "werbung", "anzeige",
+    "code", "rabatt", "gutschein", "link in der beschreibung", "beschreibung",
+    "checkt", "nutzt den code", "mit code", "aktion", "deal",
+]
+
+CONTEXT_MAP = {
+    "crypto": ["wallet", "coin", "btc", "bitcoin", "ethereum", "trading", "broker", "exchange", "krypto"],
+    "supplements": ["protein", "shake", "supplement", "whey", "pre workout", "creatine"],
+    "hardware": ["maus", "tastatur", "headset", "monitor", "gpu", "grafikkarte", "pc", "setup"],
+    "banking": ["karte", "bank", "konto", "depot", "investieren"],
+    "gaming": ["skin", "ranked", "turnier", "scrim", "fortnite", "valorant", "gameplay"],
+}
+
+def build_analysis(job_id: str, vod_url: str, segments_json: Path) -> None:
+    job = load_job(job_id)
+    segments = read_json(segments_json).get("segments", [])
+
+    brand_mentions = build_brand_mentions(vod_url, segments, job.get("brand_alerts", []))
+    hidden_context = build_hidden_context(segments)
+    summary = build_stream_summary(segments, brand_mentions, hidden_context)
+    timeline = build_timeline(segments, brand_mentions)
+    sponsor_report = build_sponsor_report(vod_url, segments, brand_mentions)
+
+    job["result"]["brand_mentions"] = brand_mentions
+    job["result"]["hidden_context"] = hidden_context
+    job["result"]["stream_summary"] = summary
+    job["result"]["timeline"] = timeline
+    job["result"]["sponsor_report"] = sponsor_report
+    job["state"]["analysis_done"] = True
+    job["metrics"]["mentions"] = len(brand_mentions)
+    save_job(job)
+
+
+def build_brand_mentions(vod_url: str, segments: List[Dict[str, Any]], brands: List[str]) -> List[Dict[str, Any]]:
+    out = []
+    patterns = [b for b in brands if b.strip()]
+    patterns_lower = [p.lower() for p in patterns]
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        low = text.lower()
+        found = []
+        for i, brand in enumerate(patterns):
+            if patterns_lower[i] in low:
+                found.append(brand)
+        sponsor_language = [p for p in SPONSOR_PATTERNS if p in low]
+        if found or sponsor_language:
+            out.append({
+                "start": seg["start"],
+                "end": seg["end"],
+                "timestamp": fmt_ts(seg["start"]),
+                "text": text,
+                "brands": found,
+                "sponsor_signals": sponsor_language,
+                "link": twitch_timestamp_link(vod_url, seg["start"]),
+            })
+    return out
+
+
+def recompute_mentions(job: Dict[str, Any]) -> None:
+    vod_url = job.get("vod_url", "")
+    segments = job["result"].get("segments", [])
+    mentions = build_brand_mentions(vod_url, segments, job.get("brand_alerts", []))
+    job["result"]["brand_mentions"] = mentions
+    job["result"]["sponsor_report"] = build_sponsor_report(vod_url, segments, mentions)
+    job["metrics"]["mentions"] = len(mentions)
+
+
+def build_hidden_context(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    counts: Dict[str, int] = {}
+    examples: Dict[str, str] = {}
+    for seg in segments:
+        text = (seg.get("text") or "").lower()
+        for topic, words in CONTEXT_MAP.items():
+            if any(word in text for word in words):
+                counts[topic] = counts.get(topic, 0) + 1
+                examples.setdefault(topic, seg.get("text") or "")
+    items = []
+    for topic, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+        items.append({
+            "topic": topic,
+            "count": count,
+            "example": examples.get(topic, ""),
+        })
+    return items
+
+
+def build_stream_summary(segments: List[Dict[str, Any]], brand_mentions: List[Dict[str, Any]], hidden_context: List[Dict[str, Any]]) -> str:
+    if not segments:
+        return ""
+    topic_part = ""
+    if hidden_context:
+        top = [item["topic"] for item in hidden_context[:3]]
+        topic_part = " Wichtige Themen: " + ", ".join(top) + "."
+    sponsor_part = ""
+    if brand_mentions:
+        brands = dedupe_strings([b for m in brand_mentions for b in m.get("brands", [])])
+        if brands:
+            sponsor_part = " Erwähnte Marken: " + ", ".join(brands[:5]) + "."
+        else:
+            sponsor_part = " Es wurden mehrere Sponsoring Formulierungen erkannt."
+    lead = " ".join([seg["text"] for seg in segments[: min(6, len(segments))]])
+    lead = lead[:850].strip()
+    summary = (lead + "." if lead and lead[-1] not in ".!?" else lead) + sponsor_part + topic_part
+    return normalize_text(summary)
+
+
+def build_timeline(segments: List[Dict[str, Any]], brand_mentions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    mention_starts = {(m["start"], m["end"]): m for m in brand_mentions}
+    for seg in segments[:250]:
+        label = "talk"
+        for m in brand_mentions:
+            if abs(float(seg["start"]) - float(m["start"])) < 0.01:
+                label = "sponsor_talk"
+                break
+        out.append({
+            "timestamp": fmt_ts(seg["start"]),
+            "label": label,
+            "text": seg["text"][:160],
+            "link": seg["link"],
+        })
+    return out
+
+
+def build_sponsor_report(vod_url: str, segments: List[Dict[str, Any]], brand_mentions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    brands = dedupe_strings([b for m in brand_mentions for b in m.get("brands", [])])
+    total_talk_time = sum(max(0.0, float(m["end"]) - float(m["start"])) for m in brand_mentions)
+
+    clips = []
+    for mention in brand_mentions[:20]:
+        clips.append({
+            "timestamp": mention["timestamp"],
+            "start": mention["start"],
+            "end": mention["end"],
+            "text": mention["text"],
+            "link": mention["link"],
+            "brands": mention.get("brands", []),
+            "viewer_count": None,
+        })
+
+    return {
+        "brands": brands,
+        "mention_count": len(brand_mentions),
+        "total_talk_time_seconds": int(total_talk_time),
+        "total_talk_time_hms": hms(int(total_talk_time)),
+        "clips_created": len(clips),
+        "clips": clips,
+    }
+
+
+# ============================================================
+# PDF export
+# ============================================================
+
+def build_pdf_bytes(report: Dict[str, Any], job: Dict[str, Any]) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+
+    y = height - 50
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40, y, "Sponsor Report")
+    y -= 24
+
+    c.setFont("Helvetica", 11)
+    c.drawString(40, y, f"Job ID: {job['id']}")
+    y -= 16
+    c.drawString(40, y, f"VOD: {job.get('vod_url', '')[:90]}")
+    y -= 16
+    c.drawString(40, y, f"Brands: {', '.join(report.get('brands', [])) or 'Keine'}")
+    y -= 16
+    c.drawString(40, y, f"Mentions: {report.get('mention_count', 0)}")
+    y -= 16
+    c.drawString(40, y, f"Talk Time: {report.get('total_talk_time_hms', '0:00')}")
+    y -= 24
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, "Mentions")
+    y -= 18
+
+    c.setFont("Helvetica", 10)
+    for clip in report.get("clips", []):
+        lines = [
+            f"{clip.get('timestamp', '')}  {', '.join(clip.get('brands', []))}".strip(),
+            clip.get("text", "")[:110],
+            clip.get("link", "")[:110],
+        ]
+        for line in lines:
+            c.drawString(40, y, line)
+            y -= 14
+            if y < 60:
+                c.showPage()
+                y = height - 50
+                c.setFont("Helvetica", 10)
+        y -= 6
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+# ============================================================
+# Cloud Run start
+# ============================================================
+
+import uvicorn
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+    )
