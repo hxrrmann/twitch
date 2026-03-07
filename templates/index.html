@@ -1,374 +1,144 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="de">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Amar Stream AI Platform</title>
   <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-  <div class="page-shell">
-    <div class="ambient ambient-left"></div>
-    <div class="ambient ambient-right"></div>
-
-    <header class="topbar">
-      <div class="brand-wrap">
-        <div class="logo-box">A</div>
-        <div class="brand-copy">
-          <div class="pills">
-            <span class="pill pill-purple">AMAR</span>
-            <span class="pill pill-green">STREAM</span>
-            <span class="pill pill-blue">AI</span>
-          </div>
-          <h1>Amar Stream AI Platform</h1>
-          <p>Sponsor Reports · Brand Mentions · Instant Search · Transkript · Hidden Context · Stream Summary</p>
+<body class="bg-zinc-950 text-zinc-100">
+<div class="bg-grid"></div>
+<div class="max-w-6xl mx-auto px-4 py-10 relative">
+  <header class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-6 mb-8">
+    <div class="flex gap-4 items-start">
+      <div class="logo"><div class="logo-inner">A</div></div>
+      <div>
+        <div class="inline-flex items-center gap-2 mb-2">
+          <span class="chip">AMAR</span><span class="chip chip2">STREAM</span><span class="chip chip3">AI</span>
         </div>
+        <h1 class="text-3xl md:text-4xl font-semibold tracking-tight">Amar Stream AI Platform</h1>
+        <p class="text-zinc-400 mt-2 max-w-2xl">Sponsor Reports · Brand Mentions · Instant Search · Transkript · Hidden Context · Stream Summary</p>
       </div>
-
-      <div class="status-dot-wrap">
-        <div class="live-state"><span class="live-dot"></span><span id="liveLabel">Starte</span></div>
-        <div class="vod-badge">VOD</div>
+    </div>
+    <div class="text-sm text-zinc-400">
+      <div class="flex items-center gap-2 justify-start lg:justify-end">
+        <span class="dot" id="dot"></span>
+        <span id="status">Bereit.</span>
+        <span id="pct" class="muted"></span>
       </div>
-    </header>
+      <div class="mt-2 flex flex-wrap gap-2 justify-start lg:justify-end">
+        <span class="badge" id="modeBadge">—</span>
+      </div>
+    </div>
+  </header>
 
-    <section class="hero-card">
-      <label class="field-group">
-        <span class="field-label">Twitch URL</span>
-        <div class="input-row single">
-          <input id="url" type="text" placeholder="https://www.twitch.tv/videos/...">
+  <section class="card p-5">
+    <div class="grid lg:grid-cols-12 gap-4 items-end">
+      <div class="lg:col-span-9">
+        <label class="label">Twitch URL</label>
+        <input id="url" class="input" placeholder="https://www.twitch.tv/videos/... oder https://www.twitch.tv/amar" />
+      </div>
+<div class="lg:col-span-3 flex gap-2">
+        <button id="start" class="btn btn-primary flex-1">Start</button>
+        <button id="stop" class="btn btn-ghost hidden">Stop</button>
+      </div>
+      <div class="lg:col-span-12">
+        <label class="label">Sponsor und Brand Mentions plus Alerts Komma getrennt</label>
+        <div class="flex gap-2">
+          <input id="alertsInput" class="input flex-1" placeholder="More Nutrition, Bitpanda" />
+          <button id="alertsBtn" class="btn btn-secondary">Setzen</button>
         </div>
-      </label>
-
-      <div class="hero-actions">
-        <button id="startBtn" class="btn btn-primary" onclick="start()">Start</button>
-        <button id="stopBtn" class="btn btn-dark" onclick="stopJob()" disabled>Stop</button>
+        <p class="hint">Words werden live geloggt und in den Sponsor Report übernommen.</p>
       </div>
+    </div>
+  </section>
 
-      <label class="field-group">
-        <span class="field-label">Sponsor und Brand Mentions plus Alerts Komma getrennt</span>
-        <div class="input-row with-side-button">
-          <input id="alerts" type="text" placeholder="More Nutrition, Bitpanda">
-          <button class="btn btn-green" onclick="saveAlerts()">Setzen</button>
-        </div>
-        <span class="field-hint">Words werden live geloggt und in den Sponsor Report übernommen.</span>
-      </label>
+  <div class="grid lg:grid-cols-12 gap-6 mt-8">
+    <section class="card lg:col-span-6 p-5">
+      <div class="flex items-center justify-between mb-3"><h2 class="title">Transkript</h2><span class="hint">klickbare Timestamps</span></div>
+      <div id="transcript" class="panel h-96 overflow-auto pr-2"></div>
     </section>
 
-    <main class="dashboard-grid">
-      <section class="card transcript-card">
-        <div class="card-head">
-          <h2>Transkript</h2>
-          <span class="muted">klickbare Timestamps</span>
-        </div>
-        <div id="transcript" class="transcript-list"></div>
+    <div class="lg:col-span-6 space-y-6">
+      <section class="card p-5">
+        <h2 class="title mb-3">Instant Search</h2>
+        <div class="flex gap-2"><input id="q" class="input flex-1" placeholder="Wort suchen" /><button id="searchBtn" class="btn btn-ghost">Suchen</button></div>
+        <div id="results" class="mt-4 space-y-3 max-h-64 overflow-auto pr-2"></div>
       </section>
 
-      <section class="stack-col">
-        <section class="card compact-card">
-          <div class="card-head compact-head">
-            <h2>Instant Search</h2>
-          </div>
-          <div class="search-row">
-            <input id="searchInput" type="text" placeholder="Wort suchen">
-            <button class="btn btn-dark" onclick="runSearch()">Suchen</button>
-          </div>
-          <div id="searchResults" class="mini-feed hidden"></div>
-        </section>
-
-        <section class="card compact-card">
-          <div class="card-head compact-head">
-            <h2>Brand Mentions Feed</h2>
-          </div>
-          <div id="mentionsFeed" class="mini-feed"></div>
-        </section>
+      <section class="card p-5">
+        <h2 class="title mb-3">Brand Mentions Feed</h2>
+        <div id="alertsBox" class="space-y-2 max-h-56 overflow-auto pr-2"></div>
       </section>
-
-      <section class="card compact-card">
-        <div class="card-head compact-head">
-          <h2>Sponsor Report</h2>
-        </div>
-        <div id="sponsorReport" class="report-list"></div>
-      </section>
-
-      <section class="card compact-card">
-        <div class="card-head compact-head">
-          <h2>Hidden Context</h2>
-        </div>
-        <div id="hiddenContext" class="context-text">Findet Kontext wie Krypto Trading Wallet Hardware auch ohne Brand Name.</div>
-      </section>
-
-      <section class="card summary-card full-row">
-        <div class="card-head compact-head">
-          <h2>Stream Summary</h2>
-        </div>
-        <div id="summary" class="summary-box"></div>
-      </section>
-    </main>
+    </div>
   </div>
 
-  <script>
-    let job = null
-    let es = null
-    let pollTimer = null
-    let transcriptItems = []
-    let mentionItems = []
+  <div class="grid lg:grid-cols-12 gap-6 mt-8">
+    <section class="card lg:col-span-6 p-5">
+      <h2 class="title mb-3">Sponsor Report</h2>
+      <div id="sponsorReport" class="space-y-3 max-h-80 overflow-auto pr-2"></div>
+    </section>
+    <section class="card lg:col-span-6 p-5">
+      <h2 class="title mb-3">Hidden Context</h2>
+      <div class="hint mb-3">Findet Kontext wie Krypto Trading Wallet Hardware auch ohne Brand Name.</div>
+      <div id="hiddenSponsor" class="space-y-3 max-h-80 overflow-auto pr-2"></div>
+    </section>
+  </div>
 
-    const hiddenKeywords = [
-      "wallet", "krypto", "crypto", "trading", "hardware", "börse", "exchange",
-      "broker", "investment", "aktie", "bitcoin", "ethereum", "karte", "gpu", "controller"
-    ]
+  <div class="grid lg:grid-cols-12 gap-6 mt-8">
+    <section class="card lg:col-span-12 p-5">
+      <h2 class="title mb-3">Stream Summary</h2>
+      <pre id="summary" class="panel text-xs overflow-auto"></pre>
+    </section>
+  </div>
 
-    function setStatusLabel(text) {
-      document.getElementById("liveLabel").innerText = text
-    }
+  <footer class="mt-10 text-xs text-zinc-500" style="text-align:center;opacity:0.7">
+    made by hörmi
+  </footer>
+</div>
 
-    function setButtons(running) {
-      document.getElementById("startBtn").disabled = running
-      document.getElementById("stopBtn").disabled = !running
-    }
+<script>
+let jobId=null, evtSrc=null, vodUrl=null; const mode='vod';
+const esc = (s)=> (s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const setStatus = (t)=>{ document.getElementById('status').textContent=t; };
+const setPct = (p, eta)=>{ const el=document.getElementById('pct'); if(p===null||p===undefined||Number.isNaN(p)){ el.textContent=''; return; } const pct=Math.max(0,Math.min(100,Math.round(p))); const etaTxt = (eta===null||eta===undefined||Number.isNaN(eta))?'' : ` ${fmtHHMMSS(eta)} remaining`; el.textContent = ` ${pct}%${etaTxt}`; };
+const setDot = (on)=>{ document.getElementById('dot').classList.toggle('dot-on', !!on); };
+const setModeBadge = (t)=>{ document.getElementById('modeBadge').textContent=t; };
+function fmtHHMMSS(sec){ sec=Math.max(0,Math.floor(sec)); const h=String(Math.floor(sec/3600)).padStart(2,'0'); const m=String(Math.floor((sec%3600)/60)).padStart(2,'0'); const s=String(sec%60).padStart(2,'0'); return `${h}:${m}:${s}`; }
+function tsLink(start){ if(!vodUrl) return null; const h=Math.floor(start/3600); const m=Math.floor((start%3600)/60); const s=Math.floor(start%60); const t=`${h}h${String(m).padStart(2,'0')}m${String(s).padStart(2,'0')}s`; return vodUrl + (vodUrl.includes('?')?'&':'?') + 't=' + t; }
+function row({title,time,text,link,metaHtml=""}){ const div=document.createElement('div'); div.className="row"; const a=link?`<a class="link" target="_blank" href="${link}">↗</a>`:`<span class="muted">LIVE</span>`; div.innerHTML=`<div class="row-top"><div class="row-title">${esc(title)} <span class="muted">${esc(time||"")}</span></div><div class="row-actions">${a}</div></div><div class="row-text">${esc(text||"")}</div>${metaHtml?`<div class="row-meta">${metaHtml}</div>`:""}`; return div; }
+function pill(t, cls="pill"){ return `<span class="${cls}">${esc(t)}</span>`; }
+function addTranscript(seg){ const box=document.getElementById('transcript'); const start=seg.start??0; const link=tsLink(start); const meta=link?`<a class="pill" target="_blank" href="${link}">Open @ ${fmtHHMMSS(start)}</a>`:`<span class="pill">LIVE @ ${fmtHHMMSS(start)}</span>`; box.appendChild(row({title:"Segment",time:fmtHHMMSS(start),text:seg.text,link,metaHtml:meta})); box.scrollTop=box.scrollHeight; }
+function renderResults(results){ const box=document.getElementById('results'); box.innerHTML=""; if(!results||!results.length){ box.innerHTML=`<div class="hint">Keine Treffer.</div>`; return; } for(const r of results){ const link=r.link||tsLink(r.start||0); box.appendChild(row({title:"Match",time:r.time||fmtHHMMSS(r.start||0),text:r.text,link})); } }
+function addAlert(a){ const link=a.link||tsLink(a.start||0); const meta=pill(`Keyword: ${a.word||""}`); document.getElementById('alertsBox').prepend(row({title:"Mention",time:a.time||fmtHHMMSS(a.start||0),text:a.text,link,metaHtml:meta})); }
+function renderSponsors(report){ const el=document.getElementById('sponsorReport'); el.innerHTML=""; const keys=Object.keys(report||{}); if(!keys.length){ el.innerHTML=`<div class="hint">Füge Brands in Alerts ein dann erscheint hier automatisch der Report.</div>`; return; } for(const k of keys){ const r=report[k]; const meta=`${pill(`Mentions: ${r.mentions}`)} ${pill(`Talktime: ${r.total_talktime_sec}s`)}`; const head=row({title:`${k}`,time:"",text:"",link:null,metaHtml:meta}); const list=document.createElement('div'); list.className="mt-3 space-y-2"; (r.hits||[]).slice(0,25).forEach(h=>{ const link=h.link||tsLink(h.start||0); list.appendChild(row({title:"Mention",time:h.time||fmtHHMMSS(h.start||0),text:h.text,link})); }); head.appendChild(list); el.appendChild(head); } }
+function renderHidden(items){ const el=document.getElementById('hiddenSponsor'); el.innerHTML=""; if(!items||!items.length){ el.innerHTML=`<div class="hint">Wird nach dem Transkript gefüllt.</div>`; return; } items.slice(0,60).forEach(it=>{ const link=it.link||tsLink(it.start||0); const meta=pill(`Context: ${it.context}`); el.appendChild(row({title:"Context",time:it.time||fmtHHMMSS(it.start||0),text:it.text,link,metaHtml:meta})); }); }
+function renderSummary(s){ document.getElementById('summary').textContent = JSON.stringify(s||{}, null, 2); }
 
-    function saveAlerts() {
-      const alerts = document.getElementById("alerts").value.trim()
-      if (!alerts) return
-      const box = document.getElementById("mentionsFeed")
-      if (!box.innerHTML.trim()) {
-        box.innerHTML = `<div class="empty-state">Alerts gesetzt: ${escapeHtml(alerts)}</div>`
-      }
-    }
+async function start(){ const url=document.getElementById('url').value.trim(); /* mode fixed to VOD */ const watchRaw=document.getElementById('alertsInput').value||""; const watch=watchRaw.split(',').map(s=>s.trim()).filter(Boolean); if(!url){ setStatus("Bitte URL eingeben."); return; } vodUrl=url; setDot(true); setModeBadge(mode.toUpperCase()); setStatus("Starte"); setPct(null);
+  document.getElementById('transcript').innerHTML=""; document.getElementById('results').innerHTML=""; document.getElementById('alertsBox').innerHTML=""; document.getElementById('sponsorReport').innerHTML=""; document.getElementById('hiddenSponsor').innerHTML=""; document.getElementById('summary').textContent="";
+  const res=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,mode:'vod',watch})}); const data=await res.json(); jobId=data.job_id; document.getElementById('stop').classList.remove('hidden');
+  if(evtSrc) evtSrc.close(); evtSrc=new EventSource(`/api/events/${jobId}`);
+  evtSrc.onmessage=(ev)=>{ const msg=JSON.parse(ev.data);
+    if(msg.type==='status'){ setStatus(`Status: ${msg.status}`); setPct(msg.pct, msg.eta_sec); }
+    else if(msg.type==='segment'){ addTranscript(msg.segment); }
+    else if(msg.type==='alert'){ addAlert(msg); }
+    else if(msg.type==='sponsors'){ renderSponsors(msg.report); }
+    else if(msg.type==='hidden_sponsor'){ renderHidden(msg.items); }
+    else if(msg.type==='summary'){ renderSummary(msg.summary); }
+    else if(msg.type==='error'){ setStatus("Fehler: "+msg.message); setPct(null); setDot(false); }
+  };
+}
+async function stop(){ if(!jobId) return; await fetch(`/api/stop/${jobId}`,{method:'POST'}); setStatus("Stop angefordert"); setPct(null); setDot(false); }
+async function search(){ const q=document.getElementById('q').value.trim(); if(!q) return; let res=await fetch(`/search?q=${encodeURIComponent(q)}`); if(res.status===404 && jobId){ res=await fetch(`/api/search/${jobId}?q=${encodeURIComponent(q)}`); } const data=await res.json(); renderResults(data.results||[]); }
+async function setAlerts(){ const raw=document.getElementById('alertsInput').value; const words=raw.split(',').map(s=>s.trim()).filter(Boolean); let res=await fetch(`/alerts`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({words})}); if(res.status===404 && jobId){ res=await fetch(`/api/watch/${jobId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({words})}); } alert(res.ok?"Alerts gesetzt":"Alerts Fehler"); }
 
-    function resetUi() {
-      transcriptItems = []
-      mentionItems = []
-      document.getElementById("transcript").innerHTML = ""
-      document.getElementById("mentionsFeed").innerHTML = ""
-      document.getElementById("summary").innerHTML = ""
-      document.getElementById("sponsorReport").innerHTML = ""
-      document.getElementById("hiddenContext").innerHTML = "Findet Kontext wie Krypto Trading Wallet Hardware auch ohne Brand Name."
-      document.getElementById("searchResults").innerHTML = ""
-      document.getElementById("searchResults").classList.add("hidden")
-    }
-
-    function escapeHtml(value) {
-      return value
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;")
-    }
-
-    function renderTranscript() {
-      const container = document.getElementById("transcript")
-      if (!transcriptItems.length) {
-        container.innerHTML = `<div class="empty-state">Noch keine Segmente.</div>`
-        return
-      }
-      container.innerHTML = transcriptItems.map(item => `
-        <article class="segment-card">
-          <div class="segment-top">
-            <strong>Segment <span>${escapeHtml(item.timestamp)}</span></strong>
-            <button class="open-link" onclick="jumpToTime('${escapeHtml(item.timestamp)}')">↗</button>
-          </div>
-          <p>${escapeHtml(item.text)}</p>
-          <button class="time-chip" onclick="jumpToTime('${escapeHtml(item.timestamp)}')">Open @ ${escapeHtml(item.timestamp)}</button>
-        </article>
-      `).join("")
-    }
-
-    function renderMentions() {
-      const container = document.getElementById("mentionsFeed")
-      if (!mentionItems.length) {
-        container.innerHTML = `<div class="empty-state">Noch keine Brand Mentions.</div>`
-        return
-      }
-      container.innerHTML = mentionItems.slice().reverse().map(item => `
-        <div class="feed-item">
-          <div class="feed-title">${escapeHtml(item.brand)} <span>${escapeHtml(item.timestamp)}</span></div>
-          <div class="feed-text">${escapeHtml(item.text)}</div>
-        </div>
-      `).join("")
-    }
-
-    function renderSponsorReport(report) {
-      const container = document.getElementById("sponsorReport")
-      const entries = Object.entries(report || {})
-      if (!entries.length) {
-        container.innerHTML = `<div class="empty-state">Noch keine Daten.</div>`
-        return
-      }
-      container.innerHTML = entries.map(([brand, data]) => `
-        <div class="report-item">
-          <div>
-            <strong>${escapeHtml(brand)}</strong>
-            <span>${escapeHtml(data.time || "0s")}</span>
-          </div>
-          <small>${escapeHtml(String(data.seconds || 0))} Sekunden</small>
-        </div>
-      `).join("")
-    }
-
-    function renderHiddenContext() {
-      const container = document.getElementById("hiddenContext")
-      const hits = transcriptItems.filter(item => {
-        const lower = item.text.toLowerCase()
-        return hiddenKeywords.some(key => lower.includes(key))
-      }).slice(-6)
-
-      if (!hits.length) {
-        container.innerHTML = "Findet Kontext wie Krypto Trading Wallet Hardware auch ohne Brand Name."
-        return
-      }
-
-      container.innerHTML = hits.map(item => `
-        <div class="context-line">
-          <span>${escapeHtml(item.timestamp)}</span>
-          <p>${escapeHtml(item.text)}</p>
-        </div>
-      `).join("")
-    }
-
-    function updateStatusView(data) {
-      const state = data.status || "running"
-      if (state === "finished") setStatusLabel("Fertig")
-      else if (state === "error") setStatusLabel("Fehler")
-      else if (state === "stopped") setStatusLabel("Gestoppt")
-      else if (state === "stopping") setStatusLabel("Stoppt")
-      else setStatusLabel("Läuft")
-
-      if (data.sponsor_talktime) renderSponsorReport(data.sponsor_talktime)
-      if (data.summary) document.getElementById("summary").innerText = data.summary
-      if (data.error) {
-        document.getElementById("summary").innerText = data.error
-      }
-    }
-
-    async function start() {
-      const url = document.getElementById("url").value.trim()
-      const alerts = document.getElementById("alerts").value.trim()
-      if (!url) return
-
-      resetUi()
-      setButtons(true)
-      setStatusLabel("Starte")
-
-      if (es) es.close()
-      if (pollTimer) clearTimeout(pollTimer)
-
-      const r = await fetch("/api/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, alerts })
-      })
-
-      if (!r.ok) {
-        setButtons(false)
-        setStatusLabel("Fehler")
-        document.getElementById("summary").innerText = "Start fehlgeschlagen."
-        return
-      }
-
-      const d = await r.json()
-      job = d.job_id
-
-      es = new EventSource("/api/events/" + job)
-
-      es.onmessage = (e) => {
-        const data = JSON.parse(e.data)
-
-        if (data.type === "segment") {
-          transcriptItems.push({ timestamp: data.timestamp, text: data.text, seconds: data.seconds || 0 })
-          renderTranscript()
-          renderHiddenContext()
-        }
-
-        if (data.type === "mention") {
-          mentionItems.push(data)
-          renderMentions()
-        }
-
-        if (data.type === "summary") {
-          document.getElementById("summary").innerText = data.text || ""
-          renderSponsorReport(data.sponsor_talktime || {})
-          setButtons(false)
-          setStatusLabel("Fertig")
-        }
-
-        if (data.type === "status") {
-          updateStatusView(data)
-          if (["finished", "error", "stopped"].includes(data.status)) {
-            setButtons(false)
-          }
-        }
-
-        if (data.type === "error") {
-          document.getElementById("summary").innerText = data.message || "Unbekannter Fehler"
-          setStatusLabel("Fehler")
-          setButtons(false)
-        }
-      }
-
-      es.onerror = () => {
-        setStatusLabel("Verbindung")
-      }
-
-      poll()
-    }
-
-    async function stopJob() {
-      if (!job) return
-      await fetch("/api/stop/" + job, { method: "POST" })
-      setStatusLabel("Stoppt")
-      setButtons(false)
-    }
-
-    async function poll() {
-      if (!job) return
-      try {
-        const r = await fetch("/api/status/" + job)
-        const d = await r.json()
-        updateStatusView(d)
-        if (["finished", "error", "stopped"].includes(d.status)) return
-      } catch (err) {
-      }
-      pollTimer = setTimeout(poll, 2000)
-    }
-
-    function runSearch() {
-      const q = document.getElementById("searchInput").value.trim().toLowerCase()
-      const box = document.getElementById("searchResults")
-      box.classList.remove("hidden")
-
-      if (!q) {
-        box.innerHTML = `<div class="empty-state">Bitte Suchwort eingeben.</div>`
-        return
-      }
-
-      const results = transcriptItems.filter(item => item.text.toLowerCase().includes(q)).slice(-8).reverse()
-
-      if (!results.length) {
-        box.innerHTML = `<div class="empty-state">Keine Treffer gefunden.</div>`
-        return
-      }
-
-      box.innerHTML = results.map(item => `
-        <div class="feed-item">
-          <div class="feed-title">Treffer <span>${escapeHtml(item.timestamp)}</span></div>
-          <div class="feed-text">${escapeHtml(item.text)}</div>
-        </div>
-      `).join("")
-    }
-
-    function jumpToTime(timestamp) {
-      const url = document.getElementById("url").value.trim()
-      if (!url) return
-      const parts = timestamp.split(":").map(Number)
-      const total = parts[0] * 3600 + parts[1] * 60 + parts[2]
-      window.open(url + "?t=" + total + "s", "_blank")
-    }
-
-    renderTranscript()
-    renderMentions()
-    renderSponsorReport({})
-  </script>
+document.getElementById('start').addEventListener('click', start);
+document.getElementById('stop').addEventListener('click', stop);
+document.getElementById('searchBtn').addEventListener('click', search);
+document.getElementById('alertsBtn').addEventListener('click', setAlerts);
+document.getElementById('q').addEventListener('keydown',(e)=>{ if(e.key==='Enter') search(); });
+</script>
 </body>
 </html>
